@@ -11,11 +11,11 @@
 /*
  * ptrace_attach()
  *
- * Use ptrace() to attach to a process. This requires calling waitpid() to
- * determine when the process is ready to be traced.
+ * Use ptrace() to attach to a process. This requires calling waitpid()
+ * to determine when the process is ready to be traced.
  *
  * args:
- * - int pid: pid of the process to attach to
+ * - pid_t target: pid of the process to attach to
  *
  */
 
@@ -23,14 +23,12 @@ void ptrace_attach(pid_t target)
 {
 	int waitpidstatus;
 
-	if(ptrace(PTRACE_ATTACH, target, NULL, NULL) == -1)
-	{
+	if (ptrace(PTRACE_ATTACH, target, NULL, NULL) == -1) {
 		fprintf(stderr, "ptrace(PTRACE_ATTACH) failed\n");
 		exit(1);
 	}
 
-	if(waitpid(target, &waitpidstatus, WUNTRACED) != target)
-	{
+	if (waitpid(target, &waitpidstatus, WUNTRACED) != target) {
 		fprintf(stderr, "waitpid(%d) failed\n", target);
 		exit(1);
 	}
@@ -39,19 +37,17 @@ void ptrace_attach(pid_t target)
 /*
  * ptrace_detach()
  *
- * Detach from a process that is being ptrace()d. Unlike ptrace_cont(), this
- * completely ends our relationship with the target process.
+ * Detach from a process that is being ptrace()d. Unlike ptrace_cont(),
+ * this completely ends our relationship with the target process.
  *
  * args:
- * - int pid: pid of the process to detach from. this process must already be
- *   ptrace()d by us in order for this to work.
+ * - pid_t target: pid of the process to detach from.
  *
  */
 
 void ptrace_detach(pid_t target)
 {
-	if(ptrace(PTRACE_DETACH, target, NULL, NULL) == -1)
-	{
+	if (ptrace(PTRACE_DETACH, target, NULL, NULL) == -1) {
 		fprintf(stderr, "ptrace(PTRACE_DETACH) failed\n");
 		exit(1);
 	}
@@ -65,16 +61,15 @@ void ptrace_detach(pid_t target)
  * functionality.
  *
  * args:
- * - int pid: pid of the target process
+ * - pid_t target: pid of the target process
  * - struct REG_TYPE* regs: a struct (either user_regs_struct or user_regs,
  *   depending on architecture) to store the resulting register data in
  *
  */
 
-void ptrace_getregs(pid_t target, struct REG_TYPE* regs)
+void ptrace_getregs(pid_t target, struct REG_TYPE *regs)
 {
-	if(ptrace(PTRACE_GETREGS, target, NULL, regs) == -1)
-	{
+	if (ptrace(PTRACE_GETREGS, target, NULL, regs) == -1) {
 		fprintf(stderr, "ptrace(PTRACE_GETREGS) failed\n");
 		exit(1);
 	}
@@ -88,26 +83,25 @@ void ptrace_getregs(pid_t target, struct REG_TYPE* regs)
  * target process after this call.
  *
  * args:
- * - int pid: pid of the target process
+ * - pid_t target: pid of the target process
  *
  */
 
 void ptrace_cont(pid_t target)
 {
-	struct timespec* sleeptime = malloc(sizeof(struct timespec));
+	struct timespec *sleeptime = malloc(sizeof(struct timespec));
 
 	sleeptime->tv_sec = 0;
 	sleeptime->tv_nsec = 5000000;
 
-	if(ptrace(PTRACE_CONT, target, NULL, NULL) == -1)
-	{
+	if (ptrace(PTRACE_CONT, target, NULL, NULL) == -1) {
 		fprintf(stderr, "ptrace(PTRACE_CONT) failed\n");
 		exit(1);
 	}
 
 	nanosleep(sleeptime, NULL);
 
-	// make sure the target process received SIGTRAP after stopping.
+	/* make sure the target process received SIGTRAP after stopping. */
 	checktargetsig(target);
 }
 
@@ -124,10 +118,9 @@ void ptrace_cont(pid_t target)
  *
  */
 
-void ptrace_setregs(pid_t target, struct REG_TYPE* regs)
+void ptrace_setregs(pid_t target, struct REG_TYPE *regs)
 {
-	if(ptrace(PTRACE_SETREGS, target, NULL, regs) == -1)
-	{
+	if (ptrace(PTRACE_SETREGS, target, NULL, regs) == -1) {
 		fprintf(stderr, "ptrace(PTRACE_SETREGS) failed\n");
 		exit(1);
 	}
@@ -152,8 +145,8 @@ void ptrace_setregs(pid_t target, struct REG_TYPE* regs)
 siginfo_t ptrace_getsiginfo(pid_t target)
 {
 	siginfo_t targetsig;
-	if(ptrace(PTRACE_GETSIGINFO, target, NULL, &targetsig) == -1)
-	{
+
+	if (ptrace(PTRACE_GETSIGINFO, target, NULL, &targetsig) == -1) {
 		fprintf(stderr, "ptrace(PTRACE_GETSIGINFO) failed\n");
 		exit(1);
 	}
@@ -180,11 +173,9 @@ void ptrace_read(int pid, unsigned long addr, void *vptr, int len)
 	long word = 0;
 	long *ptr = (long *) vptr;
 
-	while (bytesRead < len)
-	{
+	while (bytesRead < len) {
 		word = ptrace(PTRACE_PEEKTEXT, pid, addr + bytesRead, NULL);
-		if(word == -1)
-		{
+		if (word == -1) {
 			fprintf(stderr, "ptrace(PTRACE_PEEKTEXT) failed\n");
 			exit(1);
 		}
@@ -212,12 +203,10 @@ void ptrace_write(int pid, unsigned long addr, void *vptr, int len)
 	int byteCount = 0;
 	long word = 0;
 
-	while (byteCount < len)
-	{
+	while (byteCount < len) {
 		memcpy(&word, vptr + byteCount, sizeof(word));
 		word = ptrace(PTRACE_POKETEXT, pid, addr + byteCount, word);
-		if(word == -1)
-		{
+		if (word == -1) {
 			fprintf(stderr, "ptrace(PTRACE_POKETEXT) failed\n");
 			exit(1);
 		}
@@ -234,22 +223,21 @@ void ptrace_write(int pid, unsigned long addr, void *vptr, int len)
  * signal for us to receive would be SIGSEGV.
  *
  * args:
- * - int pid: pid of the target process
+ * - pid_t target: pid of the target process
  *
  */
 
-void checktargetsig(int pid)
+void checktargetsig(pid_t target)
 {
-	// check the signal that the child stopped with.
-	siginfo_t targetsig = ptrace_getsiginfo(pid);
+	/* check the signal that the child stopped with. */
+	siginfo_t targetsig = ptrace_getsiginfo(target);
 
-	// if it wasn't SIGTRAP, then something bad happened (most likely a
-	// segfault).
-	if(targetsig.si_signo != SIGTRAP)
-	{
-		fprintf(stderr, "instead of expected SIGTRAP, target stopped with signal %d: %s\n", targetsig.si_signo, strsignal(targetsig.si_signo));
-		fprintf(stderr, "sending process %d a SIGSTOP signal for debugging purposes\n", pid);
-		ptrace(PTRACE_CONT, pid, NULL, SIGSTOP);
+	/* if it's not SIGTRAP, something wrong(most likely a segfault). */
+	if (targetsig.si_signo != SIGTRAP) {
+		printf("expected SIGTRAP, but target stopped with sig %d: %s\n",
+			targetsig.si_signo, strsignal(targetsig.si_signo));
+		printf("sending proc %d a SIGSTOP signal for debugging\n", target);
+		ptrace(PTRACE_CONT, target, NULL, SIGSTOP);
 		exit(1);
 	}
 }
@@ -270,7 +258,8 @@ void checktargetsig(int pid)
  *
  */
 
-void restoreStateAndDetach(pid_t target, unsigned long addr, void* backup, int datasize, struct REG_TYPE oldregs)
+void restoreStateAndDetach(pid_t target, unsigned long addr, void *backup,
+		int datasize, struct REG_TYPE oldregs)
 {
 	ptrace_write(target, addr, backup, datasize);
 	ptrace_setregs(target, &oldregs);

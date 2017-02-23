@@ -4,6 +4,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <math.h>
+#include <errno.h>
 
 #include "utils.h"
 
@@ -22,47 +24,44 @@
  *
  */
 
-pid_t findProcessByName(char* processName)
+pid_t findProcessByName(char *processName)
 {
-	if(processName == NULL)
-	{
-		return -1;
-	}
-
+	DIR *directory;
 	struct dirent *procDirs;
+	int exePathLen;
+	char *exePath, *exeBuf;
+	ssize_t len;
+	char *exeName, *exeToken;
 
-	DIR *directory = opendir("/proc/");
+	if (processName == NULL)
+		return -1;
 
-	if (directory)
-	{
-		while ((procDirs = readdir(directory)) != NULL)
-		{
+	directory = opendir("/proc/");
+
+	if (directory) {
+		while ((procDirs = readdir(directory)) != NULL) {
 			if (procDirs->d_type != DT_DIR)
 				continue;
 
 			pid_t pid = atoi(procDirs->d_name);
 
-			int exePathLen = 10 + strlen(procDirs->d_name) + 1;
-			char* exePath = malloc(exePathLen * sizeof(char));
+			exePathLen = 10 + strlen(procDirs->d_name) + 1;
+			exePath = malloc(exePathLen * sizeof(char));
 
-			if(exePath == NULL)
-			{
+			if (exePath == NULL)
 				continue;
-			}
 
 			sprintf(exePath, "/proc/%s/exe", procDirs->d_name);
 			exePath[exePathLen-1] = '\0';
 
-			char* exeBuf = malloc(PATH_MAX * sizeof(char));
-			if(exeBuf == NULL)
-			{
+			exeBuf = malloc(PATH_MAX * sizeof(char));
+			if (exeBuf == NULL) {
 				free(exePath);
 				continue;
 			}
-			ssize_t len = readlink(exePath, exeBuf, PATH_MAX - 1);
 
-			if(len == -1)
-			{
+			len = readlink(exePath, exeBuf, PATH_MAX - 1);
+			if (len == -1) {
 				free(exePath);
 				free(exeBuf);
 				continue;
@@ -70,16 +69,14 @@ pid_t findProcessByName(char* processName)
 
 			exeBuf[len] = '\0';
 
-			char* exeName = NULL;
-			char* exeToken = strtok(exeBuf, "/");
-			while(exeToken)
-			{
+			exeName = NULL;
+			exeToken = strtok(exeBuf, "/");
+			while (exeToken) {
 				exeName = exeToken;
 				exeToken = strtok(NULL, "/");
 			}
 
-			if(strcmp(exeName, processName) == 0)
-			{
+			if (strcmp(exeName, processName) == 0) {
 				free(exePath);
 				free(exeBuf);
 				closedir(directory);
@@ -119,19 +116,19 @@ long freespaceaddr(pid_t pid)
 	long addr;
 	char str[20];
 	char perms[5];
-	sprintf(filename, "/proc/%d/maps", pid);
-	fp = fopen(filename, "r");
-	if(fp == NULL)
-		exit(1);
-	while(fgets(line, 850, fp) != NULL)
-	{
-		sscanf(line, "%lx-%*lx %s %*s %s %*d", &addr, perms, str);
 
-		if(strstr(perms, "x") != NULL)
-		{
+	sprintf(filename, "/proc/%d/maps", pid);
+
+	fp = fopen(filename, "r");
+	if (fp == NULL)
+		exit(1);
+
+	while (fgets(line, 850, fp) != NULL) {
+		sscanf(line, "%lx-%*lx %s %*s %s %*d", &addr, perms, str);
+		if (strstr(perms, "x") != NULL)
 			break;
-		}
 	}
+
 	fclose(fp);
 	return addr;
 }
@@ -142,9 +139,8 @@ long freespaceaddr(pid_t pid)
  * Gets the base address of libc.so inside a process by reading /proc/pid/maps.
  *
  * args:
- * - pid_t pid: the pid of the process whose libc.so base address we should
- *   find
- * 
+ * - pid_t pid: pid of the process whose libc.so base address we'd like to find
+ *
  * returns:
  * - a long containing the base address of libc.so inside that process
  *
@@ -156,20 +152,19 @@ long getlibcaddr(pid_t pid)
 	char filename[30];
 	char line[850];
 	long addr;
-	char perms[5];
-	char* modulePath;
+
 	sprintf(filename, "/proc/%d/maps", pid);
+
 	fp = fopen(filename, "r");
-	if(fp == NULL)
+	if (fp == NULL)
 		exit(1);
-	while(fgets(line, 850, fp) != NULL)
-	{
+
+	while (fgets(line, 850, fp) != NULL) {
 		sscanf(line, "%lx-%*lx %*s %*s %*s %*d", &addr);
-		if(strstr(line, "libc-") != NULL)
-		{
+		if (strstr(line, "libc-") != NULL)
 			break;
-		}
 	}
+
 	fclose(fp);
 	return addr;
 }
@@ -191,27 +186,26 @@ long getlibcaddr(pid_t pid)
  *
  */
 
-int checkloaded(pid_t pid, char* libname)
+int checkloaded(pid_t pid, char *libname)
 {
 	FILE *fp;
-	char filename[30];
-	char line[850];
+	char filename[30], line[850];
 	long addr;
-	char perms[5];
-	char* modulePath;
+
 	sprintf(filename, "/proc/%d/maps", pid);
+
 	fp = fopen(filename, "r");
-	if(fp == NULL)
+	if (fp == NULL)
 		exit(1);
-	while(fgets(line, 850, fp) != NULL)
-	{
+
+	while (fgets(line, 850, fp) != NULL) {
 		sscanf(line, "%lx-%*lx %*s %*s %*s %*d", &addr);
-		if(strstr(line, libname) != NULL)
-		{
+		if (strstr(line, libname) != NULL) {
 			fclose(fp);
 			return 1;
 		}
 	}
+
 	fclose(fp);
 	return 0;
 }
@@ -229,10 +223,13 @@ int checkloaded(pid_t pid, char* libname)
  *
  */
 
-long getFunctionAddress(char* funcName)
+long getFunctionAddress(char *funcName)
 {
-	void* self = dlopen("libc.so.6", RTLD_LAZY);
-	void* funcAddr = dlsym(self, funcName);
+	void *self, *funcAddr;
+
+	self = dlopen("libc.so.6", RTLD_LAZY);
+	funcAddr = dlsym(self, funcName);
+
 	return (long)funcAddr;
 }
 
@@ -261,13 +258,13 @@ long getFunctionAddress(char* funcName)
  *
  */
 
-unsigned char* findRet(void* endAddr)
+unsigned char *findRet(void *endAddr)
 {
-	unsigned char* retInstAddr = endAddr;
-	while(*retInstAddr != INTEL_RET_INSTRUCTION)
-	{
+	unsigned char *retInstAddr = endAddr;
+
+	while (*retInstAddr != INTEL_RET_INSTRUCTION)
 		retInstAddr--;
-	}
+
 	return retInstAddr;
 }
 
@@ -281,7 +278,7 @@ unsigned char* findRet(void* endAddr)
  *
  */
 
-void usage(char* name)
+void usage(char *name)
 {
-	printf("usage: %s [-n process-name] [-p pid] [library-to-inject]\n", name);
+	printf("%s [-n process-name] [-p pid] [library-to-inject]\n", name);
 }

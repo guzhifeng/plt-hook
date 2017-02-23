@@ -1,45 +1,31 @@
-CC	= clang
+CC	= gcc
 CFLAGS	= -std=gnu99 -ggdb
 UNAME_M := $(shell uname -m)
 
-.PHONY: x86 x86_64 arm
+.PHONY: x86_64
 
 all:
 ifeq ($(UNAME_M),x86_64)
 	$(MAKE) x86_64
 endif
-ifeq ($(UNAME_M),x86)
-	$(MAKE) x64
-endif
-ifneq (,$(findstring arm,$(UNAME_M)))
-	$(MAKE) arm
-endif
 
-
-arm: sample-target sample-library.so
-	$(CC) -marm $(CFLAGS) -DARM -o inject utils.c ptrace.c inject-arm.c -ldl
-
-x86: sample-target sample-library.so
-	$(CC) $(CFLAGS) -o inject utils.c ptrace.c inject-x86.c -ldl
-	
 x86_64:
-	$(CC) $(CFLAGS) -o inject utils.c ptrace.c inject-x86_64.c -ldl
-	$(CC) $(CFLAGS) -D_GNU_SOURCE -shared -o sample-library.so -fPIC sample-library.c
-	$(CC) $(CFLAGS) -o sample-target sample-target.c
-	$(CC) -m32 $(CFLAGS) -o inject32 utils.c ptrace.c inject-x86.c -ldl
-	$(CC) -m32 $(CFLAGS) -D_GNU_SOURCE -shared -o sample-library32.so -fPIC sample-library.c
-	$(CC) -m32 $(CFLAGS) -o sample-target32 sample-target.c
+	$(CC) $(CFLAGS) -o inject utils.c ptrace.c inject-x86_64.c -ldl -lm
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -shared -o libsample.so -fPIC sample-library.c -ldl
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -shared -o libsampleupdate.so -fPIC sample-library-update.c elf_hook.c -ldl
+	$(CC) $(CFLAGS) -o sample-target -I. -L. -lsample -Wl,-rpath=. sample-target.c
 
-sample-library.so: sample-library.c
-	$(CC) $(CFLAGS) -D_GNU_SOURCE -shared -o sample-library.so -fPIC sample-library.c
+libsample.so: sample-library.c
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -shared -o libsample.so -fPIC sample-library.c
+
+libsample-update.so: sample-library-update.c
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -shared -o libsampleupdate.so -fPIC sample-library-update.c
 
 sample-target: sample-target.c
-	$(CC) $(CFLAGS) -o sample-target sample-target.c
+	$(CC) $(CFLAGS) -o sample-target -I. -L. -lsample -Wl,-rpath=. sample-target.c
 
 clean:
-	rm -f sample-library.so
+	rm -f libsample.so
+	rm -f libsampleupdate.so
 	rm -f sample-target
 	rm -f inject
-	rm -f sample-library32.so
-	rm -f sample-target32
-	rm -f inject32
