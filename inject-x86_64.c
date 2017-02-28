@@ -4,7 +4,10 @@
 #include <unistd.h>
 #include <sys/user.h>
 #include <wait.h>
+#include <dlfcn.h>
+#include <fcntl.h>
 
+#include "elf_hook.h"
 #include "utils.h"
 #include "ptrace.h"
 
@@ -23,7 +26,7 @@
  *
  */
 
-void injectSharedLibrary(long mallocaddr, long freeaddr, long dlopenaddr)
+void injectSharedLibrary()
 {
 	/* rdi = address of malloc() in target process
 	 * rsi = address of free() in target process
@@ -31,7 +34,7 @@ void injectSharedLibrary(long mallocaddr, long freeaddr, long dlopenaddr)
 	 * rcx = size of the path of shared library we want to load
 	 */
 
-	/* save addr of free() and __libc_dlopen_mode() for later use */
+	/* save addr of free()/dlopen() for later use */
 	asm("push %rsi \n"
 		"push %rdx");
 
@@ -107,6 +110,8 @@ int main(int argc, char **argv)
 	char *command, *commandArg;
 	char *libname, *libPath;
 	char *processName;
+	char *origLibName;
+	char origLibPath[200];
 	pid_t mypid = 0, target = 0;
 	int libPathLength;
 	long mylibcaddr, targetLibcAddr;
@@ -123,7 +128,7 @@ int main(int argc, char **argv)
 	unsigned long long targetBuf;
 	unsigned long long libAddr;
 
-	if (argc < 4) {
+	if (argc < 5) {
 		usage(argv[0]);
 		return 1;
 	}
@@ -131,9 +136,8 @@ int main(int argc, char **argv)
 	command = argv[1];
 	commandArg = argv[2];
 	libname = argv[3];
+	origLibName = argv[4];
 	libPath = realpath(libname, NULL);
-
-	processName = NULL;
 
 	if (!libPath) {
 		fprintf(stderr, "can't find file \"%s\"\n", libname);
@@ -162,7 +166,7 @@ int main(int argc, char **argv)
 	libPathLength = strlen(libPath) + 1;
 
 	mypid = getpid();
-	mylibcaddr = getlibcaddr(mypid);
+	mylibcaddr = getSharedLibAddr(mypid, "libc-");
 
 	/* find the addresses of the syscalls that we'd like to use inside the
 	 * target, as loaded inside THIS process (i.e. NOT the target process)
@@ -179,7 +183,7 @@ int main(int argc, char **argv)
 	dlopenOffset = dlopenAddr - mylibcaddr;
 
 	/* get the target process' libc function address */
-	targetLibcAddr = getlibcaddr(target);
+	targetLibcAddr = getSharedLibAddr(target, "libc-");
 	targetMallocAddr = targetLibcAddr + mallocOffset;
 	targetFreeAddr = targetLibcAddr + freeOffset;
 	targetDlopenAddr = targetLibcAddr + dlopenOffset;
@@ -188,14 +192,40 @@ int main(int argc, char **argv)
 	memset(&regs, 0, sizeof(struct user_regs_struct));
 
 	ptrace_attach(target);
-
 	ptrace_getregs(target, &oldregs);
+	memcpy(&regs, &oldregs, sizeof(struct user_regs_struct));
 
-	/* check the stack */
-	{
+	/* check the stack activeness */
+	long curr = oldregs.rip;
+
+	/* read function length in .dynsym */
+	getSharedLibPath(target, origLibName, origLibPath);
+	long origLibAddr = getSharedLibAddr(target, origLibName);
+	int desc = open(origLibPath, O_RDONLY);
+	if (desc < 0) {
+		fprintf(stderr, "can't open \"%s\"\n", origLibPath);
+		ptrace_detach(target);
+		return 1;
 	}
 
-	memcpy(&regs, &oldregs, sizeof(struct user_regs_struct));
+	Elf_Shdr *dynsym = NULL;
+	Elf_Sym *symbol = NULL;
+	char* name = "libsample";
+	size_t name_index;
+	long func_addr, func_size;
+ 	/* get symbol named "name" in the ".dynsym" section */
+	if (section_by_type(desc, SHT_DYNSYM, &dynsym) ||
+	symbol_by_name(desc, dynsym, name, &symbol, &name_index)) {
+		func_addr = origLibAddr + symbol->st_value;
+		func_size = symbol->st_size;
+	}
+
+	if ((curr >= func_addr) && (curr <= func_addr + func_size)) {
+		printf("stack safety check failed for \"%d\"\n", target);
+		close(desc);
+		ptrace_detach(target);
+		return 1;
+	}
 
 	/* find a good address to copy code to */
 	addr = freespaceaddr(target) + sizeof(long);
@@ -249,7 +279,9 @@ int main(int argc, char **argv)
 	 */
 	ptrace_write(target, addr, newcode, injectSharedLibrary_size);
 
-	/* let the target run our injected code. */
+	/* call free() and we don't care whether this succeeds, so don't
+	 * bother checking the return value.
+	 */
 	ptrace_cont(target);
 
 	/* the target process malloc() returns. check wether it succeeded */
@@ -262,6 +294,7 @@ int main(int argc, char **argv)
 				injectSharedLibrary_size, oldregs);
 		free(backup);
 		free(newcode);
+		close(desc);
 		return 1;
 	}
 
@@ -285,14 +318,22 @@ int main(int argc, char **argv)
 				injectSharedLibrary_size, oldregs);
 		free(backup);
 		free(newcode);
+		close(desc);
 		return 1;
 	}
 
 	/* now check /proc/pid/maps to see whether injection succecced. */
 	if (checkloaded(target, libname))
 		printf("\"%s\" successfully injected\n", libname);
-	else
+	else {
 		fprintf(stderr, "could not inject \"%s\"\n", libname);
+		restoreStateAndDetach(target, addr, backup,
+				injectSharedLibrary_size, oldregs);
+		free(backup);
+		free(newcode);
+		close(desc);
+		return 1;
+	}
 
 	/* call free() and we don't care whether this succeeds, so don't
 	 * bother checking the return value.
@@ -304,6 +345,7 @@ int main(int argc, char **argv)
 			injectSharedLibrary_size, oldregs);
 	free(backup);
 	free(newcode);
+	close(desc);
 
 	return 0;
 }

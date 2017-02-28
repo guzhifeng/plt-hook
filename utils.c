@@ -134,19 +134,20 @@ long freespaceaddr(pid_t pid)
 }
 
 /*
- * getlibcaddr()
+ * getSharedLibAddr()
  *
  * Gets the base address of libc.so inside a process by reading /proc/pid/maps.
  *
  * args:
  * - pid_t pid: pid of the process whose libc.so base address we'd like to find
+ * - char *libstr : subset string of the shared library name
  *
  * returns:
  * - a long containing the base address of libc.so inside that process
  *
  */
 
-long getlibcaddr(pid_t pid)
+long getSharedLibAddr(pid_t pid, char *libstr)
 {
 	FILE *fp;
 	char filename[30];
@@ -160,13 +161,52 @@ long getlibcaddr(pid_t pid)
 		exit(1);
 
 	while (fgets(line, 850, fp) != NULL) {
-		sscanf(line, "%lx-%*lx %*s %*s %*s %*d", &addr);
-		if (strstr(line, "libc-") != NULL)
+		sscanf(line, "%lx-%*lx %*s %*s %*s %*d %*s", &addr);
+		if (strstr(line, libstr) != NULL)
 			break;
 	}
 
 	fclose(fp);
 	return addr;
+}
+
+/*
+ * getSharedLibPath()
+ *
+ * Gets the name of original lib by reading /proc/pid/maps.
+ *
+ * args:
+ * - pid_t pid: pid of the process we'd like to find
+ * - char *libstr: Original function to be replaced
+ *
+ * returns:
+ * - a long containing the base address of libc.so inside that process
+ *
+ */
+
+void getSharedLibPath(pid_t pid, char *libstr, char *libpath)
+{
+	FILE *fp;
+	char filename[30];
+	char line[850];
+	int len;
+
+	sprintf(filename, "/proc/%d/maps", pid);
+
+	fp = fopen(filename, "r");
+	if (fp == NULL)
+		exit(1);
+
+	while (fgets(line, 850, fp) != NULL) {
+		sscanf(line, "%*lx-%*lx %*s %*s %*s %*d %s", libpath);
+		if (strstr(line, libstr) != NULL)
+			break;
+	}
+
+	len = strlen(libpath);
+	libpath[len] = '\0';
+
+	fclose(fp);
 }
 
 /*
@@ -267,6 +307,8 @@ unsigned char *findRet(void *endAddr)
 
 	return retInstAddr;
 }
+
+
 
 /*
  * usage()

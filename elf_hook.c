@@ -2,32 +2,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
-#include <elf.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <errno.h>
 
-/*
- * rename standart types for convenience
- */
-#ifdef __x86_64
-    #define Elf_Ehdr Elf64_Ehdr
-    #define Elf_Shdr Elf64_Shdr
-    #define Elf_Sym Elf64_Sym
-    #define Elf_Rel Elf64_Rela
-    #define ELF_R_SYM ELF64_R_SYM
-    #define REL_DYN ".rela.dyn"
-    #define REL_PLT ".rela.plt"
-#else
-    #define Elf_Ehdr Elf32_Ehdr
-    #define Elf_Shdr Elf32_Shdr
-    #define Elf_Sym Elf32_Sym
-    #define Elf_Rel Elf32_Rel
-    #define ELF_R_SYM ELF32_R_SYM
-    #define REL_DYN ".rel.dyn"
-    #define REL_PLT ".rel.plt"
-#endif
+#include "elf_hook.h"
 
 static int read_header(int d, Elf_Ehdr **header)
 {
@@ -173,7 +153,7 @@ static int section_by_index(int d, size_t const index, Elf_Shdr **section)
 	return 0;
 }
 
-static int section_by_type(int d, size_t const section_type, Elf_Shdr **section)
+int section_by_type(int d, size_t const section_type, Elf_Shdr **section)
 {
 	Elf_Ehdr *header = NULL;
 	Elf_Shdr *sections = NULL;
@@ -244,7 +224,8 @@ static int section_by_name(int d, char const *section_name, Elf_Shdr **section)
 
 	return 0;
 }
-static int symbol_by_name(int d, Elf_Shdr *section, char const *name,
+
+int symbol_by_name(int d, Elf_Shdr *section, char const *name,
 		Elf_Sym **symbol, size_t *index)
 {
 	Elf_Shdr *strings_section = NULL;
