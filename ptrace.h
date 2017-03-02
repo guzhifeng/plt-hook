@@ -1,8 +1,12 @@
-#ifdef ARM
-	#define REG_TYPE user_regs
-#else
-	#define REG_TYPE user_regs_struct
-#endif
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ptrace.h>
+#include <sys/user.h>
+#include <wait.h>
+#include <time.h>
+
+#define REG_TYPE user_regs_struct
 
 void ptrace_attach(pid_t target);
 void ptrace_detach(pid_t target);

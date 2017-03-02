@@ -12,7 +12,70 @@
 
 #include "elf_hook.h"
 #include "utils.h"
+#include "ptrace.h"
 
+void target_snippet(void) { 
+	asm("push %r9 \n"
+	"callq *%r9 \n"
+	"pop %r9 \n"
+	);
+}
+
+void target_snippet_end() {
+}
+
+size_t inject_target_snippet(pid_t pid, long addr, char *backup)
+{
+	size_t target_snippet_size;
+	intptr_t target_snippet_ret;
+	char *newcode;
+	target_snippet_size = (intptr_t)target_snippet_end -
+		(intptr_t)target_snippet;
+
+	/* also figure out where the RET instruction at the end of
+	 * target_snippet() lies and overwrite it with an INT 3
+	 * in order to break back into the target process. note that on x64,
+	 * gcc force function addresses to be word-aligned,
+	 * which means that functions are padded with NOPs. as a result, even
+	 * though we've found the length of the function, it is very likely
+	 * padded with NOPs, so we need to actually search to find the RET.
+	 */
+	target_snippet_ret = (intptr_t)findRet(target_snippet_end) -
+		(intptr_t)target_snippet;
+
+	/* back up whatever data at the address we want to modify. */
+	ptrace_read(pid, addr, backup, target_snippet_size);
+
+	/* set up a buffer and copy target_snippet() code into the
+	 * target process.
+	 */
+	newcode = calloc(1, target_snippet_size * sizeof(char));
+	memcpy(newcode, target_snippet, target_snippet_size - 1);
+	/* overwrite the RET instruction with an INT 3. */
+	newcode[target_snippet_ret] = INTEL_INT3_INSTRUCTION;
+
+	/* copy target_snippet()'s code to the target address inside the
+	 * target process' address space.
+	 */
+	ptrace_write(pid, addr, newcode, target_snippet_size);
+	free(newcode);
+	return target_snippet_size;
+}
+
+/*
+ * checkstack()
+ *
+ * Check the target stack frame to make sure it is safe to replace the function.
+ *
+ * args:
+ * - pid_t pid: process ID of the target process.
+ * - long addr: address where target process's instruction register point at.
+ * - char* libame: name of the shared library to be replaced.
+ *
+ * returns:
+ * - a pid_t containing the pid of the process (or -1 if not found)
+ *
+ */
 int checkstack(pid_t pid, long addr, char* libname)
 {
 	long func_addr, func_size;
