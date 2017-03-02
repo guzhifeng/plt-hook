@@ -6,8 +6,47 @@
 #include <dlfcn.h>
 #include <math.h>
 #include <errno.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
+#include "elf_hook.h"
 #include "utils.h"
+
+int checkstack(pid_t pid, long addr, char* libname)
+{
+	long func_addr, func_size;
+	char libpath[200];
+	getSharedLibPath(pid, libname, libpath);
+	long libAddr = getSharedLibAddr(pid, libname);
+	int desc = open(libpath, O_RDONLY);
+	if (desc < 0) {
+		fprintf(stderr, "can't open \"%s\"\n", libpath);
+		return 0;
+	}
+
+	/* read function length in .dynsym */
+	Elf_Shdr *dynsym = NULL;
+	Elf_Sym *symbol = NULL;
+	char* name = "libsample";
+	size_t name_index;
+ 	/* get symbol named "name" in the ".dynsym" section */
+	if (section_by_type(desc, SHT_DYNSYM, &dynsym) ||
+	symbol_by_name(desc, dynsym, name, &symbol, &name_index)) {
+		close(desc);
+		return 0;
+	}
+
+	func_addr = libAddr + symbol->st_value;
+	func_size = symbol->st_size;
+	
+	if ((addr >= func_addr) && (addr <= func_addr + func_size)) {
+		printf("stack safety check failed for \"%d\"\n", pid);
+	}
+
+	close(desc);
+	return 1;
+}
 
 /*
  * findProcessByName()

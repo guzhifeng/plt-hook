@@ -4,105 +4,18 @@
 #include <unistd.h>
 #include <sys/user.h>
 #include <wait.h>
-#include <dlfcn.h>
-#include <fcntl.h>
 
-#include "elf_hook.h"
 #include "utils.h"
 #include "ptrace.h"
 
-/*
- * injectSharedLibrary()
- *
- * This is the code that will actually be injected into the target process.
- * This code is responsible for loading the shared library into the target
- * process' address space.  First, it calls malloc() to allocate a buffer to
- * hold the filename of the library to be loaded. Then, it calls
- * __libc_dlopen_mode(), libc's implementation of dlopen(), to load the desired
- * shared library. Finally, it calls free() to free the buffer containing the
- * library name. Each time it needs to give control back to the injector
- * process, it breaks back in by executing an "int $3" instruction. See the
- * comments below for more details on how this works.
- *
- */
-
-void injectSharedLibrary()
-{
-	/* rdi = address of malloc() in target process
-	 * rsi = address of free() in target process
-	 * rdx = address of __libc_dlopen_mode() in target process
-	 * rcx = size of the path of shared library we want to load
-	 */
-
-	/* save addr of free()/dlopen() for later use */
-	asm("push %rsi \n"
-		"push %rdx");
-
-	/* call malloc(), R9 play a role as intermediate register */
+void target_inject(void) { 
 	asm("push %r9 \n"
-		"mov %rdi,%r9 \n"
-		"mov %rcx,%rdi \n"
-		"callq *%r9 \n"
-		"pop %r9 \n"
-		/* break in so that we can see what malloc() returned */
-		"int $3"
+	"callq *%r9 \n"
+	"pop %r9 \n"
 	);
-
-	/* call __libc_dlopen_mode((void *)dsoname, RTLD_LAZY) */
-	asm(
-		/* pop addr__libc_dlopen_mode() from the stack */
-		"pop %rdx \n"
-		"push %r9 \n"
-		"mov %rdx,%r9 \n"
-		"mov %rax,%rdi \n"
-		"movabs $1,%rsi \n"
-		"callq *%r9 \n"
-		"pop %r9 \n"
-		"int $3"
-	);
-
-	/* call free() to free the buffer we allocated earlier.
-	 * Note: I found that if you put a nonzero value in r9, free() seems to
-	 * interpret that as an address to be freed, even though it's only
-	 * supposed to take one argument. As a result, I had to call it using a
-	 * register that's not used as part of the x64 calling convention. I
-	 * chose rbx.
-	 */
-	asm(
-		/* rax contain our malloc()d buffer */
-		"mov %rax,%rdi \n"
-		/* pop address of free() from stack */
-		"pop %rsi \n"
-		"push %rbx \n"
-		"mov %rsi,%rbx \n"
-		/* zero out rsi, because free() might think that it contains
-		 * something that should be freed
-		 */
-		"xor %rsi,%rsi \n"
-		/* break in so we can check the arguments before making the call */
-		"int $3 \n"
-		/* call free() */
-		"callq *%rbx \n"
-		/* restore previous rbx value */
-		"pop %rbx"
-	);
-
-/* we already overwrote the RET instruction at the end of this function
- * with an INT 3, so at this point the injector will regain control of
- * the target's execution.
- */
 }
 
-/*
- * injectSharedLibrary_end()
- *
- * This function's only purpose is to be contiguous to injectSharedLibrary(),
- * so that we can use its address to more precisely figure out how long
- * injectSharedLibrary() is.
- *
- */
-void injectSharedLibrary_end(void)
-{
+void target_inject_end() {
 }
 
 int main(int argc, char **argv)
@@ -111,7 +24,6 @@ int main(int argc, char **argv)
 	char *libname, *libPath;
 	char *processName;
 	char *origLibName;
-	char origLibPath[200];
 	pid_t mypid = 0, target = 0;
 	int libPathLength;
 	long mylibcaddr, targetLibcAddr;
@@ -122,8 +34,8 @@ int main(int argc, char **argv)
 	struct user_regs_struct malloc_regs;
 	struct user_regs_struct dlopen_regs;
 	long addr;
-	size_t injectSharedLibrary_size;
-	intptr_t injectSharedLibrary_ret;
+	size_t target_inject_size;
+	intptr_t target_inject_ret;
 	char *backup, *newcode;
 	unsigned long long targetBuf;
 	unsigned long long libAddr;
@@ -167,23 +79,23 @@ int main(int argc, char **argv)
 
 	mypid = getpid();
 	mylibcaddr = getSharedLibAddr(mypid, "libc-");
+	targetLibcAddr = getSharedLibAddr(target, "libc-");
 
 	/* find the addresses of the syscalls that we'd like to use inside the
 	 * target, as loaded inside THIS process (i.e. NOT the target process)
+	 * use the base address of libc to calculate offsets for the syscalls
+	 * we want to use
 	 */
+
 	mallocAddr = getFunctionAddress("malloc");
 	freeAddr = getFunctionAddress("free");
 	dlopenAddr = getFunctionAddress("__libc_dlopen_mode");
 
-	/* use the base address of libc to calculate offsets for the syscalls
-	 * we want to use
-	 */
 	mallocOffset = mallocAddr - mylibcaddr;
 	freeOffset = freeAddr - mylibcaddr;
 	dlopenOffset = dlopenAddr - mylibcaddr;
 
 	/* get the target process' libc function address */
-	targetLibcAddr = getSharedLibAddr(target, "libc-");
 	targetMallocAddr = targetLibcAddr + mallocOffset;
 	targetFreeAddr = targetLibcAddr + freeOffset;
 	targetDlopenAddr = targetLibcAddr + dlopenOffset;
@@ -197,32 +109,7 @@ int main(int argc, char **argv)
 
 	/* check the stack activeness */
 	long curr = oldregs.rip;
-
-	/* read function length in .dynsym */
-	getSharedLibPath(target, origLibName, origLibPath);
-	long origLibAddr = getSharedLibAddr(target, origLibName);
-	int desc = open(origLibPath, O_RDONLY);
-	if (desc < 0) {
-		fprintf(stderr, "can't open \"%s\"\n", origLibPath);
-		ptrace_detach(target);
-		return 1;
-	}
-
-	Elf_Shdr *dynsym = NULL;
-	Elf_Sym *symbol = NULL;
-	char* name = "libsample";
-	size_t name_index;
-	long func_addr, func_size;
- 	/* get symbol named "name" in the ".dynsym" section */
-	if (section_by_type(desc, SHT_DYNSYM, &dynsym) ||
-	symbol_by_name(desc, dynsym, name, &symbol, &name_index)) {
-		func_addr = origLibAddr + symbol->st_value;
-		func_size = symbol->st_size;
-	}
-
-	if ((curr >= func_addr) && (curr <= func_addr + func_size)) {
-		printf("stack safety check failed for \"%d\"\n", target);
-		close(desc);
+	if (!checkstack(target, oldregs.rip, origLibName)) {
 		ptrace_detach(target);
 		return 1;
 	}
@@ -230,26 +117,8 @@ int main(int argc, char **argv)
 	/* find a good address to copy code to */
 	addr = freespaceaddr(target) + sizeof(long);
 
-	/* will copy injectSharedLibrary() to this addr, set the target's rip to
-	 * it. we have to advance by 2 bytes here because rip gets incremented
-	 * by the size of the current instruction, and the instruction at the
-	 * start of the function to inject always happens to be 2 bytes long.
-	 */
-	regs.rip = addr + 2;
-
-	/*
-	 * accroding to x64 calling convention, arguments are passed via REGs
-	 * rdi, rsi, rdx, rcx, r8, and r9. see comments in injectSharedLibrary()
-	 * for more details.
-	 */
-	regs.rdi = targetMallocAddr;
-	regs.rsi = targetFreeAddr;
-	regs.rdx = targetDlopenAddr;
-	regs.rcx = libPathLength;
-	ptrace_setregs(target, &regs);
-
-	injectSharedLibrary_size = (intptr_t)injectSharedLibrary_end -
-		(intptr_t)injectSharedLibrary;
+	target_inject_size = (intptr_t)target_inject_end -
+		(intptr_t)target_inject;
 
 	/* also figure out where the RET instruction at the end of
 	 * injectSharedLibrary() lies and overwrite it with an INT 3
@@ -259,29 +128,42 @@ int main(int argc, char **argv)
 	 * though we've found the length of the function, it is very likely
 	 * padded with NOPs, so we need to actually search to find the RET.
 	 */
-	injectSharedLibrary_ret = (intptr_t)findRet(injectSharedLibrary_end) -
-		(intptr_t)injectSharedLibrary;
+	target_inject_ret = (intptr_t)findRet(target_inject_end) -
+		(intptr_t)target_inject;
 
 	/* back up whatever data at the address we want to modify. */
-	backup = malloc(injectSharedLibrary_size * sizeof(char));
-	ptrace_read(target, addr, backup, injectSharedLibrary_size);
+	backup = malloc(target_inject_size * sizeof(char));
+	ptrace_read(target, addr, backup, target_inject_size);
 
 	/* set up a buffer and copy injectSharedLibrary() code into the
 	 * target process.
 	 */
-	newcode = calloc(1, injectSharedLibrary_size * sizeof(char));
-	memcpy(newcode, injectSharedLibrary, injectSharedLibrary_size - 1);
+	newcode = calloc(1, target_inject_size * sizeof(char));
+	memcpy(newcode, target_inject, target_inject_size - 1);
 	/* overwrite the RET instruction with an INT 3. */
-	newcode[injectSharedLibrary_ret] = INTEL_INT3_INSTRUCTION;
+	newcode[target_inject_ret] = INTEL_INT3_INSTRUCTION;
 
 	/* copy injectSharedLibrary()'s code to the target address inside the
 	 * target process' address space.
 	 */
-	ptrace_write(target, addr, newcode, injectSharedLibrary_size);
+	ptrace_write(target, addr, newcode, target_inject_size);
+	free(newcode);
 
-	/* call free() and we don't care whether this succeeds, so don't
-	 * bother checking the return value.
+	/* will copy injectSharedLibrary() to this addr, set the target's rip to
+	 * it. we have to advance by 2 bytes here because rip gets incremented
+	 * by the size of the current instruction, and the instruction at the
+	 * start of the function to inject always happens to be 2 bytes long.
+	 *
+	 * accroding to x64 calling convention, arguments are passed via REGs
+	 * rdi, rsi, rdx, rcx, r8, and r9. see comments in injectSharedLibrary()
+	 * for more details.
 	 */
+	regs.rip = addr + 2;
+	regs.r9 = targetMallocAddr;
+	regs.rdi = libPathLength;
+	ptrace_setregs(target, &regs);
+
+	/* call malloc() */
 	ptrace_cont(target);
 
 	/* the target process malloc() returns. check wether it succeeded */
@@ -291,10 +173,8 @@ int main(int argc, char **argv)
 	if (targetBuf == 0) {
 		fprintf(stderr, "malloc() failed to allocate memory\n");
 		restoreStateAndDetach(target, addr, backup,
-				injectSharedLibrary_size, oldregs);
+				target_inject_size, oldregs);
 		free(backup);
-		free(newcode);
-		close(desc);
 		return 1;
 	}
 
@@ -302,6 +182,14 @@ int main(int argc, char **argv)
 	 * buffer. 
 	 */
 	ptrace_write(target, targetBuf, libPath, libPathLength);
+
+	memcpy(&regs, &oldregs, sizeof(struct user_regs_struct));
+	regs.rip = addr + 2;
+	regs.r9 = targetDlopenAddr;
+	regs.rdi = targetBuf;
+	regs.rsi = 1;
+
+	ptrace_setregs(target, &regs);
 
 	/* continue the target's execution and call __libc_dlopen_mode. */
 	ptrace_cont(target);
@@ -315,10 +203,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "__libc_dlopen_mode() failed to load %s\n",
 				libname);
 		restoreStateAndDetach(target, addr, backup,
-				injectSharedLibrary_size, oldregs);
-		free(backup);
-		free(newcode);
-		close(desc);
+				target_inject_size, oldregs);
 		return 1;
 	}
 
@@ -328,24 +213,25 @@ int main(int argc, char **argv)
 	else {
 		fprintf(stderr, "could not inject \"%s\"\n", libname);
 		restoreStateAndDetach(target, addr, backup,
-				injectSharedLibrary_size, oldregs);
+				target_inject_size, oldregs);
 		free(backup);
-		free(newcode);
-		close(desc);
 		return 1;
 	}
 
 	/* call free() and we don't care whether this succeeds, so don't
 	 * bother checking the return value.
 	 */
+	memcpy(&regs, &oldregs, sizeof(struct user_regs_struct));
+	regs.rip = addr + 2;
+	regs.r9 = targetFreeAddr;
+	regs.rdi = targetBuf;
+	ptrace_setregs(target, &regs);
 	ptrace_cont(target);
 
 	/* restore the old state and detach from the target. */
 	restoreStateAndDetach(target, addr, backup,
-			injectSharedLibrary_size, oldregs);
+			target_inject_size, oldregs);
 	free(backup);
-	free(newcode);
-	close(desc);
 
 	return 0;
 }
