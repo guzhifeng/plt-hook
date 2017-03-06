@@ -27,4 +27,4 @@ int section_by_type(int d, size_t const section_type, Elf_Shdr **section);
 int symbol_by_name(int d, Elf_Shdr *section, char const *name, Elf_Sym **symbol, size_t *index);
 
 //int get_module_base_address(char const *module_filename, void *handle, void **base);
-void *elf_hook(char const *library_filename, char const *function_name, void const *substitution_address);
+void *elf_hook(pid_t target, char *funcname, char *newLibName, char *origLibName);

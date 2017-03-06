@@ -58,6 +58,29 @@ void inject_target_snippet(pid_t pid, long addr, char *backup, size_t codelen)
 	free(newcode);
 }
 
+/*
+ * getLibcFuncAddr()
+ *
+ * Find the address of a function within our own loaded copy of libc.so.
+ *
+ * args:
+ * - char* funcName: name of the function whose address we want to find
+ *
+ * returns:
+ * - a long containing the address of that function
+ *
+ */
+
+long getLibcFuncAddr(char *funcName)
+{
+	void *self, *funcAddr;
+
+	self = dlopen("libc.so.6", RTLD_LAZY);
+	funcAddr = dlsym(self, funcName);
+
+	return (long)funcAddr;
+}
+
 size_t inject_shared_library(pid_t target, char *newLibName, char *origLibName)
 {
 	char *libPath;
@@ -95,9 +118,9 @@ size_t inject_shared_library(pid_t target, char *newLibName, char *origLibName)
 	 * we want to use
 	 */
 
-	mallocAddr = getFunctionAddress("malloc");
-	freeAddr = getFunctionAddress("free");
-	dlopenAddr = getFunctionAddress("__libc_dlopen_mode");
+	mallocAddr = getLibcFuncAddr("malloc");
+	freeAddr = getLibcFuncAddr("free");
+	dlopenAddr = getLibcFuncAddr("__libc_dlopen_mode");
 
 	mallocOffset = mallocAddr - mylibcaddr;
 	freeOffset = freeAddr - mylibcaddr;
@@ -206,6 +229,7 @@ end:
 	free(backup);
 	return error;
 }
+
 /*
  * checkstack()
  *
@@ -257,6 +281,41 @@ int checkstack(pid_t pid, long addr, char* libname)
 
 	close(desc);
 	return 1;
+}
+
+long getTargetFuncAddr(pid_t target, char* funcname, char* libname)
+{
+	long func_addr;
+	char libpath[PATH_MAX];
+	long libAddr;
+	int desc;
+	size_t name_index;
+
+	/* read function length in .dynsym */
+	Elf_Shdr *dynsym = NULL;
+	Elf_Sym *symbol = NULL;
+
+	getSharedLibPath(target, libname, libpath);
+	libAddr = getSharedLibAddr(target, libname);
+	desc = open(libpath, O_RDONLY);
+	if (desc < 0) {
+		fprintf(stderr, "can't open \"%s\"\n", libpath);
+		return 0;
+	}
+
+ 	/* get symbol named "funcname" in the ".dynsym" section */
+	if (section_by_type(desc, SHT_DYNSYM, &dynsym) ||
+	symbol_by_name(desc, dynsym, funcname, &symbol, &name_index)) {
+		close(desc);
+		return 0;
+	}
+
+	func_addr = libAddr + symbol->st_value;
+
+	free(dynsym);
+	free(symbol);
+	close(desc);
+	return func_addr;
 }
 
 /*
@@ -384,6 +443,38 @@ long freespaceaddr(pid_t pid)
 }
 
 /*
+ * getProcessElfPath()
+ *
+ * Gets the name of original lib by readlink of /proc/pid/exe.
+ *
+ * args:
+ * - pid_t pid: pid of the process we'd like to find
+ * - char *elfPath: 
+ *
+ * returns:
+ * - success 0; fail 1
+ *
+ */
+
+int getProcessElfPath(pid_t pid, char *elfpath)
+{
+	FILE *fp;
+	char exename[30];
+	char line[850];
+	int len;
+
+	sprintf(exename, "/proc/%d/exe", pid);
+
+	len = readlink(exename, elfpath, PATH_MAX - 1);
+	if (len == -1) {
+		fprintf(stderr, "readlink failed \"%d\" !\n", errno);
+		return 1;
+	}
+
+	elfpath[len] = '\0';
+	return 0;
+}
+/*
  * getSharedLibAddr()
  *
  * Gets the base address of libc.so inside a process by reading /proc/pid/maps.
@@ -500,28 +591,6 @@ int checkloaded(pid_t pid, char *libname)
 	return 0;
 }
 
-/*
- * getFunctionAddress()
- *
- * Find the address of a function within our own loaded copy of libc.so.
- *
- * args:
- * - char* funcName: name of the function whose address we want to find
- *
- * returns:
- * - a long containing the address of that function
- *
- */
-
-long getFunctionAddress(char *funcName)
-{
-	void *self, *funcAddr;
-
-	self = dlopen("libc.so.6", RTLD_LAZY);
-	funcAddr = dlsym(self, funcName);
-
-	return (long)funcAddr;
-}
 
 /*
  * findRet()
@@ -572,5 +641,5 @@ unsigned char *findRet(void *endAddr)
 
 void usage(char *name)
 {
-	printf("%s [-n process-name] [-p pid] [library-to-inject]\n", name);
+	printf("%s [-n process-name] [-p pid] [original-library] [library-to-inject] [function-to-be-raplaced]\n", name);
 }

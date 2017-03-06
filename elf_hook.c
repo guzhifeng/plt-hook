@@ -6,8 +6,11 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <errno.h>
+#include <linux/limits.h>
 
 #include "elf_hook.h"
+#include "utils.h"
+#include "ptrace.h"
 
 static int read_header(int d, Elf_Ehdr **header)
 {
@@ -336,11 +339,10 @@ int get_module_base_address(char const *elf_name,
 }
 */
 
-void *elf_hook(char const *elf_name, char const *name,
-		void const *substitution)
-{
+void *elf_hook(pid_t target, char *funcname, char *newLibName, char *origLibName) {
 	static size_t pagesize;
 	int descriptor;
+	char *target_elfpath;
 
 	Elf_Shdr
 	*dynsym = NULL,  // ".dynsym" section header
@@ -358,19 +360,27 @@ void *elf_hook(char const *elf_name, char const *name,
 	i,
 	name_index,  //index of symbol named "name" in ".dyn.sym"
 	rel_plt_amount,  // amount of ".rel.plt" entries
-	rel_dyn_amount,  // amount of ".rel.dyn" entries
-	*name_address = NULL;  //address of relocation for symbol named "name"
+	rel_dyn_amount;  // amount of ".rel.dyn" entries
+	
+	void *name_address;  //address of relocation for symbol named "name"
 
 	/* address of the symbol being substituted */
-	void *original = NULL;
+	long *original = NULL;
+	long *subst = NULL;
 
-	if (name == NULL || substitution == NULL)
-		return original;
+	target_elfpath = malloc(PATH_MAX * sizeof(char));
+	if (target_elfpath == NULL)
+		fprintf(stderr, "malloc failed \"%d\" !\n", errno);
+	if (getProcessElfPath(target, target_elfpath))
+		return NULL;
+
+	subst = calloc(1, sizeof(long));
+	*subst = getTargetFuncAddr(target, funcname, newLibName);
 
 	if (!pagesize)
 		pagesize = sysconf(_SC_PAGESIZE);
 
-	descriptor = open(elf_name, O_RDONLY);
+	descriptor = open(target_elfpath, O_RDONLY);
 
 	if (descriptor < 0)
 		return original;
@@ -378,7 +388,7 @@ void *elf_hook(char const *elf_name, char const *name,
  	/* get ".dynsym" section */
 	if (section_by_type(descriptor, SHT_DYNSYM, &dynsym) ||
 	/* only need the index of symbol named "name" in the ".dynsym" table */
-	symbol_by_name(descriptor, dynsym, name, &symbol, &name_index) ||
+	symbol_by_name(descriptor, dynsym, funcname, &symbol, &name_index) ||
 	/* get ".rel.plt" (for 32-bit) or ".rela.plt" (for 64-bit) section */
 	section_by_name(descriptor, REL_PLT, &rel_plt) ||
 	/* get ".rel.dyn" (for 32-bit) or ".rela.dyn" (for 64-bit) section */
@@ -413,78 +423,25 @@ void *elf_hook(char const *elf_name, char const *name,
 	 * and the symbol's index
 	 * lookup the ".rel.plt" table
 	 */
+	ptrace_attach(target);
+	Elf_Rel *relplt_t = calloc(1, sizeof(Elf_Rel));
 	for (i = 0; i < rel_plt_amount; ++i) {
+		ptrace_read(target, (unsigned long)&(rel_plt_table[i]), (void *)relplt_t, sizeof(Elf_Rel));
 		/* if we found the symbol to substitute in ".rel.plt" */
-		if (ELF_R_SYM(rel_plt_table[i].r_info) == name_index) {
-			name_address = (size_t *)(rel_plt_table[i].r_offset);
-			/*save the original function address, and replace it
-			 * with the substitutional
-			 */
-			original =
-				(void *)*(size_t *)(rel_plt_table[i].r_offset);
-			/* mark a memory page contains relocation as writable */
-			if (mprotect((void *)(((size_t)name_address) &
-				(((size_t)-1) ^ (pagesize - 1))),
-				pagesize, PROT_READ | PROT_WRITE) < 0)
-				return NULL;
-
-			*(size_t *)(rel_plt_table[i].r_offset) =
-				(size_t)substitution;
-
-			/* mark a memory page contains relocation as executable */
-			if (mprotect((void *)(((size_t)name_address) &
-				(((size_t)-1) ^ (pagesize - 1))), pagesize,
-						PROT_READ | PROT_EXEC) < 0)
-				return NULL;
-
+		if (ELF_R_SYM(relplt_t->r_info) == name_index) {
 			/* the target symbol appears in ".rel.plt" only once */
 			break;
 		}
 	}
 
-	if (original)
-		return original;
-
-	/* we will get here only with 32-bit non-PIC module look up 
-	 * the ".rel.dyn" table
+	name_address = (void *)(relplt_t->r_offset);
+	/*save the original function address, and replace it
+	 * with the substitutional
 	 */
-	for (i = 0; i < rel_dyn_amount; ++i)
-		/* if we found the symbol to substitute in ".rel.dyn" */
-		if (ELF_R_SYM(rel_dyn_table[i].r_info) == name_index) {
-			/* get the relocation address (address of a relative
-			 * CALL (0xE8) instruction's argument)
-			 */
-			name_address = (size_t *)(rel_dyn_table[i].r_offset);
-
-			/* calculate an address of the original function by
-			 * a relative CALL (0xE8) instruction's argument
-			 */
-			if (!original)
-				original = (void *)(*name_address +
-					(size_t)name_address + sizeof(size_t));
-
-			/* mark page contains the relocation as writable */
-			if (mprotect((void *)(((size_t)name_address) &
-				(((size_t)-1) ^ (pagesize - 1))), pagesize,
-					PROT_READ | PROT_WRITE) < 0) {
-				return NULL;
-		}
-
-		/* calculate a new relative CALL (0xE8)instruction's argument
-		 * for the substitutional function and write it down
-		 */
-		*name_address = (size_t)substitution -
-			(size_t)name_address - sizeof(size_t);
-
-		/* mark page that contains the relocation back as executable */
-		if (mprotect((void *)(((size_t)name_address) & (((size_t)-1) ^
-		(pagesize - 1))), pagesize, PROT_READ | PROT_EXEC) < 0) {
-			/* something wrong, so restore original. */
-			*name_address = (size_t)original - (size_t)name_address
-				- sizeof(size_t);
-			return NULL;
-		}
-	}
+	original = calloc(1, sizeof(long));
+	ptrace_read(target, (unsigned long)name_address, original, sizeof(long));
+	ptrace_write(target, (unsigned long)name_address, subst, sizeof(long));
+	ptrace_detach(target);
 
 	return original;
 }

@@ -7,13 +7,15 @@
 
 #include "utils.h"
 #include "ptrace.h"
+#include "elf_hook.h"
 
 int main(int argc, char **argv)
 {
 	char *command, *commandArg;
-	char *libname;
+	char *newlibname;
 	char *processName;
 	char *origLibName;
+	char *funcname;
 	pid_t target_pid = 0;
 	int error = 0;
 
@@ -24,8 +26,9 @@ int main(int argc, char **argv)
 
 	command = argv[1];
 	commandArg = argv[2];
-	libname = argv[3];
-	origLibName = argv[4];
+	origLibName = argv[3];
+	newlibname = argv[4];
+	funcname = argv[5];
 
 	if (!strcmp(command, "-n")) {
 		processName = commandArg;
@@ -46,7 +49,12 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	error = inject_shared_library(target_pid, libname, origLibName);
+	error = inject_shared_library(target_pid, newlibname, origLibName);
 	if(error)
 		return error;
+
+	if (!elf_hook(target_pid, funcname, newlibname, origLibName))
+		error = 1;
+		
+	return error;
 }
