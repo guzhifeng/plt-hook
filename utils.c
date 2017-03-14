@@ -24,7 +24,7 @@ void target_snippet(void) {
 void target_snippet_end() {
 }
 
-void inject_target_snippet(pid_t pid, long addr, char *backup, size_t codelen)
+static void inject_target_snippet(pid_t target, long addr, char *backup, size_t code_len)
 {
 	intptr_t target_snippet_ret;
 	char *newcode;
@@ -37,445 +37,52 @@ void inject_target_snippet(pid_t pid, long addr, char *backup, size_t codelen)
 	 * though we've found the length of the function, it is very likely
 	 * padded with NOPs, so we need to actually search to find the RET.
 	 */
-	target_snippet_ret = (intptr_t)findRet(target_snippet_end) -
+	target_snippet_ret = (intptr_t)find_ret_inst(target_snippet_end) -
 		(intptr_t)target_snippet;
 
 	/* back up whatever data at the address we want to modify. */
-	ptrace_read(pid, addr, backup, codelen);
+	ptrace_read(target, addr, backup, code_len);
 
 	/* set up a buffer and copy target_snippet() code into the
 	 * target process.
 	 */
-	newcode = calloc(1, codelen * sizeof(char));
-	memcpy(newcode, target_snippet, codelen - 1);
+	newcode = calloc(1, code_len * sizeof(char));
+	memcpy(newcode, target_snippet, code_len - 1);
 	/* overwrite the RET instruction with an INT 3. */
 	newcode[target_snippet_ret] = INTEL_INT3_INSTRUCTION;
 
 	/* copy target_snippet()'s code to the target address inside the
 	 * target process' address space.
 	 */
-	ptrace_write(pid, addr, newcode, codelen);
+	ptrace_write(target, addr, newcode, code_len);
 	free(newcode);
 }
 
 /*
- * getLibcFuncAddr()
+ * get_libc_funcaddr()
  *
  * Find the address of a function within our own loaded copy of libc.so.
  *
  * args:
- * - char* funcName: name of the function whose address we want to find
+ * - char* funcname: name of the function whose address we want to find
  *
  * returns:
  * - a long containing the address of that function
  *
  */
-
-long getLibcFuncAddr(char *funcName)
+static long get_libc_funcaddr(char *funcname)
 {
-	void *self, *funcAddr;
+	void *self;
+	long func_addr;
 
 	self = dlopen("libc.so.6", RTLD_LAZY);
-	funcAddr = dlsym(self, funcName);
+	func_addr = (long)dlsym(self, funcname);
 
-	return (long)funcAddr;
-}
-
-size_t inject_shared_library(pid_t target, char *newLibName, char *origLibName)
-{
-	char *libPath;
-	int libPathLength;
-	pid_t mypid = 0;
-	long mylibcaddr, targetLibcAddr;
-	long mallocAddr, freeAddr, dlopenAddr;
-	long mallocOffset, freeOffset, dlopenOffset;
-	long targetMallocAddr, targetFreeAddr, targetDlopenAddr;
-	struct user_regs_struct oldregs, regs;
-	struct user_regs_struct target_regs;
-	long addr, curr;
-	size_t target_snippet_size;
-	unsigned long long targetBuf;
-	unsigned long long libAddr;
-	char *backup;
-	int error = 0;
-
-	libPath = realpath(newLibName, NULL);
-
-	if (!libPath) {
-		fprintf(stderr, "can't find file \"%s\"\n", newLibName);
-		return 1;
-	}
-
-	libPathLength = strlen(libPath) + 1;
-
-	mypid = getpid();
-	mylibcaddr = getSharedLibAddr(mypid, "libc-");
-	targetLibcAddr = getSharedLibAddr(target, "libc-");
-
-	/* find the addresses of the syscalls that we'd like to use inside the
-	 * target, as loaded inside THIS process (i.e. NOT the target process)
-	 * use the base address of libc to calculate offsets for the syscalls
-	 * we want to use
-	 */
-
-	mallocAddr = getLibcFuncAddr("malloc");
-	freeAddr = getLibcFuncAddr("free");
-	dlopenAddr = getLibcFuncAddr("__libc_dlopen_mode");
-
-	mallocOffset = mallocAddr - mylibcaddr;
-	freeOffset = freeAddr - mylibcaddr;
-	dlopenOffset = dlopenAddr - mylibcaddr;
-
-	/* get the target process' libc function address */
-	targetMallocAddr = targetLibcAddr + mallocOffset;
-	targetFreeAddr = targetLibcAddr + freeOffset;
-	targetDlopenAddr = targetLibcAddr + dlopenOffset;
-
-	memset(&oldregs, 0, sizeof(struct user_regs_struct));
-	memset(&regs, 0, sizeof(struct user_regs_struct));
-
-	ptrace_attach(target);
-	ptrace_getregs(target, &oldregs);
-	memcpy(&regs, &oldregs, sizeof(struct user_regs_struct));
-
-	/* check the stack activeness */
-	curr = oldregs.rip;
-	if (!checkstack(target, oldregs.rip, origLibName)) {
-		ptrace_detach(target);
-		return 1;
-	}
-
-	/* find a good address and copy target_snippet() to it*/
-	addr = freespaceaddr(target) + sizeof(long);
-	target_snippet_size = (intptr_t)target_snippet_end -
-		(intptr_t)target_snippet;
-	backup = calloc(1, target_snippet_size * sizeof(char));
-	inject_target_snippet(target, addr, backup, target_snippet_size);
-
-	/* set the target's rip to it. we have to advance by 2 bytes here
-	 * because rip gets incremented by the size of the current instruction,
-	 * and the instruction at the start of the function to inject always
-	 * happens to be 2 bytes long.
-	 *
-	 * accroding to x64 calling convention, arguments are passed via REGs
-	 * rdi, rsi, rdx, rcx, r8, and r9. see comments in target_snippet()
-	 * for more details.
-	 */
-	regs.rip = addr + 2;
-	regs.r9 = targetMallocAddr;
-	regs.rdi = libPathLength;
-	ptrace_setregs(target, &regs);
-
-	/* call malloc() */
-	ptrace_cont(target);
-
-	/* the target process malloc() returns. check wether it succeeded */
-	memset(&target_regs, 0, sizeof(struct user_regs_struct));
-	ptrace_getregs(target, &target_regs);
-	targetBuf = target_regs.rax;
-	if (targetBuf == 0) {
-		error = 1;
-		fprintf(stderr, "malloc() failed to allocate memory\n");
-		goto end;
-	}
-
-	/* malloc() succeeded, copy path of shared lib into the malloc'd
-	 * buffer. 
-	 */
-	ptrace_write(target, targetBuf, libPath, libPathLength);
-
-	/* continue the target's execution and call __libc_dlopen_mode. */
-	regs.rip = addr + 2;
-	regs.r9 = targetDlopenAddr;
-	regs.rdi = targetBuf;
-	regs.rsi = 1;
-
-	ptrace_setregs(target, &regs);
-	ptrace_cont(target);
-
-	memset(&target_regs, 0, sizeof(struct user_regs_struct));
-	ptrace_getregs(target, &target_regs);
-	libAddr = target_regs.rax;
-
-	/* if rax is 0 here, dlopen() failed, bail out cleanly. */
-	if (libAddr == 0) {
-		error = 1;
-		fprintf(stderr, "dlopen() failed to load %s\n", newLibName);
-		goto end;
-	}
-
-	/* now check /proc/pid/maps to see whether injection succecced. */
-	if (checkloaded(target, newLibName))
-		printf("\"%s\" successfully injected\n", newLibName);
-	else {
-		error = 1;
-		fprintf(stderr, "could not inject \"%s\"\n", newLibName);
-		goto end;
-	}
-
-	/* call free() and we don't care whether this succeeds, so don't
-	 * bother checking the return value.
-	 */
-	regs.rip = addr + 2;
-	regs.r9 = targetFreeAddr;
-	regs.rdi = targetBuf;
-	ptrace_setregs(target, &regs);
-	ptrace_cont(target);
-
-end:
-	/* restore the old state and detach from the target. */
-	restoreStateAndDetach(target, addr, backup,
-			target_snippet_size, oldregs);
-	free(backup);
-	return error;
-}
-
-/*
- * checkstack()
- *
- * Check the target stack frame to make sure it is safe to replace the function.
- *
- * args:
- * - pid_t pid: process ID of the target process.
- * - long addr: address where target process's instruction register point at.
- * - char* libame: name of the shared library to be replaced.
- *
- * returns:
- * - a pid_t containing the pid of the process (or -1 if not found)
- *
- */
-int checkstack(pid_t pid, long addr, char* libname)
-{
-	long func_addr, func_size;
-	char libpath[PATH_MAX];
-	long libAddr;
-	int desc;
-
-	/* read function length in .dynsym */
-	Elf_Shdr *dynsym = NULL;
-	Elf_Sym *symbol = NULL;
-	char* name = "libsample";
-	size_t name_index;
-
-	getSharedLibPath(pid, libname, libpath);
-	libAddr = getSharedLibAddr(pid, libname);
-	desc = open(libpath, O_RDONLY);
-	if (desc < 0) {
-		fprintf(stderr, "can't open \"%s\"\n", libpath);
-		return 0;
-	}
-
- 	/* get symbol named "name" in the ".dynsym" section */
-	if (section_by_type(desc, SHT_DYNSYM, &dynsym) ||
-	symbol_by_name(desc, dynsym, name, &symbol, &name_index)) {
-		close(desc);
-		return 0;
-	}
-
-	func_addr = libAddr + symbol->st_value;
-	func_size = symbol->st_size;
-	
-	if ((addr >= func_addr) && (addr <= func_addr + func_size)) {
-		printf("stack safety check failed for \"%d\"\n", pid);
-	}
-
-	close(desc);
-	return 1;
-}
-
-long getTargetFuncAddr(pid_t target, char* funcname, char* libname)
-{
-	long func_addr;
-	char libpath[PATH_MAX];
-	long libAddr;
-	int desc;
-	size_t name_index;
-
-	/* read function length in .dynsym */
-	Elf_Shdr *dynsym = NULL;
-	Elf_Sym *symbol = NULL;
-
-	getSharedLibPath(target, libname, libpath);
-	libAddr = getSharedLibAddr(target, libname);
-	desc = open(libpath, O_RDONLY);
-	if (desc < 0) {
-		fprintf(stderr, "can't open \"%s\"\n", libpath);
-		return 0;
-	}
-
- 	/* get symbol named "funcname" in the ".dynsym" section */
-	if (section_by_type(desc, SHT_DYNSYM, &dynsym) ||
-	symbol_by_name(desc, dynsym, funcname, &symbol, &name_index)) {
-		close(desc);
-		return 0;
-	}
-
-	func_addr = libAddr + symbol->st_value;
-
-	free(dynsym);
-	free(symbol);
-	close(desc);
 	return func_addr;
 }
 
 /*
- * findProcessByName()
- *
- * Given the name of a process, try to find its PID by searching through /proc
- * and reading /proc/[pid]/exe until we find a process whose name matches the
- * given process.
- *
- * args:
- * - char* processName: name of the process whose pid to find
- *
- * returns:
- * - a pid_t containing the pid of the process (or -1 if not found)
- *
- */
-
-pid_t findProcessByName(char *processName)
-{
-	DIR *directory;
-	struct dirent *procDirs;
-	int exePathLen;
-	char *exePath, *exeBuf;
-	ssize_t len;
-	char *exeName, *exeToken;
-
-	if (processName == NULL)
-		return -1;
-
-	directory = opendir("/proc/");
-
-	if (directory) {
-		while ((procDirs = readdir(directory)) != NULL) {
-			if (procDirs->d_type != DT_DIR)
-				continue;
-
-			pid_t pid = atoi(procDirs->d_name);
-
-			exePathLen = 10 + strlen(procDirs->d_name) + 1;
-			exePath = malloc(exePathLen * sizeof(char));
-
-			if (exePath == NULL)
-				continue;
-
-			sprintf(exePath, "/proc/%s/exe", procDirs->d_name);
-			exePath[exePathLen-1] = '\0';
-
-			exeBuf = malloc(PATH_MAX * sizeof(char));
-			if (exeBuf == NULL) {
-				free(exePath);
-				continue;
-			}
-
-			len = readlink(exePath, exeBuf, PATH_MAX - 1);
-			if (len == -1) {
-				free(exePath);
-				free(exeBuf);
-				continue;
-			}
-
-			exeBuf[len] = '\0';
-
-			exeName = NULL;
-			exeToken = strtok(exeBuf, "/");
-			while (exeToken) {
-				exeName = exeToken;
-				exeToken = strtok(NULL, "/");
-			}
-
-			if (strcmp(exeName, processName) == 0) {
-				free(exePath);
-				free(exeBuf);
-				closedir(directory);
-				return pid;
-			}
-
-			free(exePath);
-			free(exeBuf);
-		}
-
-		closedir(directory);
-	}
-
-	return -1;
-}
-
-/*
- * freespaceaddr()
- *
- * Search the target process' /proc/pid/maps entry and find an executable
- * region of memory that we can use to run code in.
- *
- * args:
- * - pid_t pid: pid of process to inspect
- *
- * returns:
- * - a long containing the address of an executable region of memory inside the
- *   specified process' address space.
- *
- */
-
-long freespaceaddr(pid_t pid)
-{
-	FILE *fp;
-	char filename[30];
-	char line[850];
-	long addr;
-	char str[20];
-	char perms[5];
-
-	sprintf(filename, "/proc/%d/maps", pid);
-
-	fp = fopen(filename, "r");
-	if (fp == NULL)
-		exit(1);
-
-	while (fgets(line, 850, fp) != NULL) {
-		sscanf(line, "%lx-%*lx %s %*s %s %*d", &addr, perms, str);
-		if (strstr(perms, "x") != NULL)
-			break;
-	}
-
-	fclose(fp);
-	return addr;
-}
-
-/*
- * getProcessElfPath()
- *
- * Gets the name of original lib by readlink of /proc/pid/exe.
- *
- * args:
- * - pid_t pid: pid of the process we'd like to find
- * - char *elfPath: 
- *
- * returns:
- * - success 0; fail 1
- *
- */
-
-int getProcessElfPath(pid_t pid, char *elfpath)
-{
-	FILE *fp;
-	char exename[30];
-	char line[850];
-	int len;
-
-	sprintf(exename, "/proc/%d/exe", pid);
-
-	len = readlink(exename, elfpath, PATH_MAX - 1);
-	if (len == -1) {
-		fprintf(stderr, "readlink failed \"%d\" !\n", errno);
-		return 1;
-	}
-
-	elfpath[len] = '\0';
-	return 0;
-}
-/*
- * getSharedLibAddr()
+ * get_libaddr()
  *
  * Gets the base address of libc.so inside a process by reading /proc/pid/maps.
  *
@@ -488,7 +95,7 @@ int getProcessElfPath(pid_t pid, char *elfpath)
  *
  */
 
-long getSharedLibAddr(pid_t pid, char *libstr)
+static long get_libaddr(pid_t pid, char *libstr)
 {
 	FILE *fp;
 	char filename[30];
@@ -499,7 +106,7 @@ long getSharedLibAddr(pid_t pid, char *libstr)
 
 	fp = fopen(filename, "r");
 	if (fp == NULL)
-		exit(1);
+		return -1;
 
 	while (fgets(line, 850, fp) != NULL) {
 		sscanf(line, "%lx-%*lx %*s %*s %*s %*d %*s", &addr);
@@ -512,46 +119,46 @@ long getSharedLibAddr(pid_t pid, char *libstr)
 }
 
 /*
- * getSharedLibPath()
+ * get_freespace_addr()
  *
- * Gets the name of original lib by reading /proc/pid/maps.
+ * Search the target process' /proc/pid/maps entry and find an executable
+ * region of memory that we can use to run code in.
  *
  * args:
- * - pid_t pid: pid of the process we'd like to find
- * - char *libstr: Original function to be replaced
+ * - pid_t pid: pid of process to inspect
  *
  * returns:
- * - a long containing the base address of libc.so inside that process
+ * - a long containing the address of an executable region of memory inside the
+ *   specified process' address space.
  *
  */
-
-void getSharedLibPath(pid_t pid, char *libstr, char *libpath)
+static long get_freespace_addr(pid_t pid)
 {
 	FILE *fp;
-	char filename[30];
-	char line[850];
-	int len;
+	char filename[PATH_MAX];
+	char line[PATH_MAX];
+	long addr;
+	char str[20];
+	char perms[5];
 
 	sprintf(filename, "/proc/%d/maps", pid);
 
 	fp = fopen(filename, "r");
 	if (fp == NULL)
-		exit(1);
+		return -1;
 
 	while (fgets(line, 850, fp) != NULL) {
-		sscanf(line, "%*lx-%*lx %*s %*s %*s %*d %s", libpath);
-		if (strstr(line, libstr) != NULL)
+		sscanf(line, "%lx-%*lx %s %*s %s %*d", &addr, perms, str);
+		if (strstr(perms, "x") != NULL)
 			break;
 	}
 
-	len = strlen(libpath);
-	libpath[len] = '\0';
-
 	fclose(fp);
+	return addr;
 }
 
 /*
- * checkloaded()
+ * check_loaded()
  *
  * Given a process ID and the name of a shared library, check whether that
  * process has loaded the shared library by reading entries in its
@@ -566,8 +173,7 @@ void getSharedLibPath(pid_t pid, char *libstr, char *libpath)
  *   process (1 = yes, 0 = no)
  *
  */
-
-int checkloaded(pid_t pid, char *libname)
+static int check_loaded(pid_t pid, char *libname)
 {
 	FILE *fp;
 	char filename[30], line[850];
@@ -577,7 +183,7 @@ int checkloaded(pid_t pid, char *libname)
 
 	fp = fopen(filename, "r");
 	if (fp == NULL)
-		exit(1);
+		return -1;
 
 	while (fgets(line, 850, fp) != NULL) {
 		sscanf(line, "%lx-%*lx %*s %*s %*s %*d", &addr);
@@ -588,12 +194,491 @@ int checkloaded(pid_t pid, char *libname)
 	}
 
 	fclose(fp);
+	return -1;
+}
+
+size_t inject_shared_library(pid_t target, char *libname)
+{
+	char *libpath;
+	int libpath_len;
+	pid_t mypid = 0;
+	long my_libcaddr, tgt_libcaddr;
+	long my_mallocaddr, my_freeaddr, my_dlopenaddr;
+	long malloc_offset, free_offset, dlopen_offset;
+	long tgt_mallocaddr, tgt_freeaddr, tgt_dlopenaddr;
+	struct user_regs_struct oldregs, regs;
+	struct user_regs_struct target_regs;
+	long addr, curr;
+	size_t target_snippet_size;
+	unsigned long long tgt_buf;
+	unsigned long long lib_addr;
+	char *backup;
+	int error = 0;
+
+	libpath = realpath(libname, NULL);
+	if (!libpath) {
+		printf("can't find file \"%s\"\n", libname);
+		return -1;
+	}
+
+	libpath_len = strlen(libpath) + 1;
+
+	mypid = getpid();
+
+	my_libcaddr = get_libaddr(mypid, "libc-");
+	if (!my_libcaddr)
+		return -1;
+
+	tgt_libcaddr = get_libaddr(target, "libc-");
+	if (!tgt_libcaddr)
+		return -1;
+
+	/* find the addresses of the syscalls that we'd like to use inside the
+	 * target, use the base address of libc of THIS process to calculate
+	 * offsets for the syscalls
+	 */
+	my_mallocaddr = get_libc_funcaddr("malloc");
+	my_freeaddr = get_libc_funcaddr("free");
+	my_dlopenaddr = get_libc_funcaddr("__libc_dlopen_mode");
+
+	malloc_offset = my_mallocaddr - my_libcaddr;
+	free_offset = my_freeaddr - my_libcaddr;
+	dlopen_offset = my_dlopenaddr - my_libcaddr;
+
+	/* get the target process' libc function address */
+	tgt_mallocaddr = tgt_libcaddr + malloc_offset;
+	tgt_freeaddr = tgt_libcaddr + free_offset;
+	tgt_dlopenaddr = tgt_libcaddr + dlopen_offset;
+
+	memset(&oldregs, 0, sizeof(struct user_regs_struct));
+	memset(&regs, 0, sizeof(struct user_regs_struct));
+
+	ptrace_attach(target);
+	ptrace_getregs(target, &oldregs);
+	memcpy(&regs, &oldregs, sizeof(struct user_regs_struct));
+
+//	/* check the stack activeness */
+//	curr = oldregs.rip;
+//	if (!check_stack(target, oldregs.rip, origLibName)) {
+//		ptrace_detach(target);
+//		return 1;
+//	}
+
+	/* find a good address and copy target_snippet() to it */
+	addr = get_freespace_addr(target);
+	if (!addr)
+		return -1;
+
+	addr += sizeof(long);
+
+	target_snippet_size = (intptr_t)target_snippet_end -
+		(intptr_t)target_snippet;
+	backup = calloc(1, target_snippet_size * sizeof(char));
+	if (backup == NULL) {
+		return -errno;
+	}
+
+	inject_target_snippet(target, addr, backup, target_snippet_size);
+
+	/* set the target's rip to it. we have to advance by 2 bytes here
+	 * because rip gets incremented by the size of the current instruction,
+	 * and the instruction at the start of the function to inject always
+	 * happens to be 2 bytes long.
+	 *
+	 * accroding to x64 calling convention, arguments are passed via REGs
+	 * rdi, rsi, rdx, rcx, r8, and r9. see comments in target_snippet()
+	 * for more details.
+	 */
+	regs.rip = addr + 2;
+	regs.r9 = tgt_mallocaddr;
+	regs.rdi = libpath_len;
+	ptrace_setregs(target, &regs);
+
+	/* call malloc() */
+	ptrace_cont(target);
+
+	/* the target process malloc() returns. check wether it succeeded */
+	memset(&target_regs, 0, sizeof(struct user_regs_struct));
+	ptrace_getregs(target, &target_regs);
+	tgt_buf = target_regs.rax;
+	if (tgt_buf == 0) {
+		error = -1;
+		printf("malloc() failed to allocate memory\n");
+		goto end;
+	}
+
+	/* malloc() succeeded, copy path of shared lib into the malloc'd
+	 * buffer. 
+	 */
+	ptrace_write(target, tgt_buf, libpath, libpath_len);
+
+	/* continue the target's execution and call __libc_dlopen_mode. */
+	regs.rip = addr + 2;
+	regs.r9 = tgt_dlopenaddr;
+	regs.rdi = tgt_buf;
+	regs.rsi = 1;
+
+	ptrace_setregs(target, &regs);
+	ptrace_cont(target);
+
+	memset(&target_regs, 0, sizeof(struct user_regs_struct));
+	ptrace_getregs(target, &target_regs);
+	lib_addr = target_regs.rax;
+
+	/* if rax is 0 here, dlopen() failed, bail out cleanly. */
+	if (lib_addr == 0) {
+		error = -1;
+		fprintf(stderr, "dlopen() failed to load %s\n", libname);
+		goto end;
+	}
+
+	/* now check /proc/pid/maps to see whether injection succecced. */
+	if (check_loaded(target, libname))
+		printf("\"%s\" successfully injected\n", libname);
+	else {
+		error = -1;
+		fprintf(stderr, "could not inject \"%s\"\n", libname);
+		goto end;
+	}
+
+	/* call free() and we don't care whether this succeeds, so don't
+	 * bother checking the return value.
+	 */
+	regs.rip = addr + 2;
+	regs.r9 = tgt_freeaddr;
+	regs.rdi = tgt_buf;
+	ptrace_setregs(target, &regs);
+	ptrace_cont(target);
+
+end:
+	/* restore the old state and detach from the target. */
+	restoreStateAndDetach(target, addr, backup,
+			target_snippet_size, oldregs);
+	free(backup);
+	return error;
+}
+
+/*
+ * check_stack()
+ *
+ * Check the target stack frame to make sure it is safe to replace the function.
+ *
+ * args:
+ * - pid_t pid: process ID of the target process.
+ * - long addr: address where target process's instruction register point at.
+ * - char* libame: name of the shared library to be replaced.
+ *
+ * returns:
+ * - a pid_t containing the pid of the process (or -1 if not found)
+ *
+ */
+int check_stack(pid_t pid, long addr, char* libname)
+{
+	long func_addr, func_size;
+	char *libpath;
+	long libaddr;
+	int desc;
+
+	/* read function length in .dynsym */
+	Elf_Shdr *dynsym = NULL;
+	Elf_Sym *symbol = NULL;
+	char *name = "libsample";
+	size_t name_index;
+
+	libpath = (char *)calloc(1, PATH_MAX * sizeof(char));
+	if (!get_libpath(pid, libname, &libpath))
+		return -1;
+
+	libaddr = get_libaddr(pid, libname);
+	desc = open(libpath, O_RDONLY);
+	if (desc < 0) {
+		fprintf(stderr, "can't open \"%s\"\n", libpath);
+		free(libpath);
+		return -1;
+	}
+
+ 	/* get symbol named "name" in the ".dynsym" section */
+	dynsym = (Elf_Shdr *)malloc(sizeof(Elf_Shdr));
+	if (dynsym == NULL) {
+		free(libpath);
+		close(desc);
+		return -errno;
+	}
+	if (section_by_type(desc, SHT_DYNSYM, &dynsym)) {
+		free(libpath);
+		close(desc);
+		free(dynsym);
+		return -errno;
+	}
+
+	symbol = (Elf_Sym *)malloc(sizeof(Elf_Sym));
+	if (symbol == NULL) {
+		free(libpath);
+		close(desc);
+		free(dynsym);
+		return -errno;
+	}
+
+	if (symbol_by_name(desc, dynsym, name, &symbol, &name_index)) {
+		free(libpath);
+		close(desc);
+		free(dynsym);
+		free(symbol);
+		return -errno;
+	}
+
+	func_addr = libaddr + symbol->st_value;
+	func_size = symbol->st_size;
+	
+	if ((addr >= func_addr) && (addr <= func_addr + func_size)) {
+		printf("stack safety check failed for \"%d\"\n", pid);
+	}
+	
+	free(libpath);
+	close(desc);
+	free(dynsym);
+	free(symbol);
+	return 0;
+}
+
+long get_tgt_funcaddr(pid_t target, char* funcname, char* libname)
+{
+	long func_addr;
+	char *libpath;
+	long libaddr;
+	int desc;
+	size_t name_index;
+
+	/* read function length in .dynsym */
+	Elf_Shdr *dynsym = NULL;
+	Elf_Sym *symbol = NULL;
+
+	libpath = (char *)calloc(1, PATH_MAX * sizeof(char));
+	if (libpath == NULL)
+		return -1;
+
+	if (get_libpath(target, libname, &libpath)) {
+		free(libpath);
+		return -1;
+	}
+
+	libaddr = get_libaddr(target, libname);
+	if (libaddr < 0) {
+		free(libpath);
+		return -1;
+	}
+
+	desc = open(libpath, O_RDONLY);
+	if (desc < 0) {
+		free(libpath);
+		printf("can't open %s\n", libpath);
+		return -1;
+	}
+
+ 	/* get symbol named "funcname" in the ".dynsym" section */
+	dynsym = (Elf_Shdr *)malloc(sizeof(Elf_Shdr));
+	if (dynsym == NULL) {
+		close(desc);
+		free(libpath);
+		return -errno;
+	}
+
+	if (section_by_type(desc, SHT_DYNSYM, &dynsym) < 0) {
+		free(dynsym);
+		close(desc);
+		free(libpath);
+		return -errno;
+	}
+
+	symbol = (Elf_Sym *)malloc(sizeof(Elf_Sym));
+	if (symbol == NULL) {
+		free(dynsym);
+		close(desc);
+		free(libpath);
+		return -errno;
+	}
+
+	if (symbol_by_name(desc, dynsym, funcname, &symbol, &name_index)) {
+		free(dynsym);
+		close(desc);
+		free(libpath);
+		free(symbol);
+		return -errno;
+	}
+
+	func_addr = libaddr + symbol->st_value;
+
+	free(dynsym);
+	close(desc);
+	free(libpath);
+	free(symbol);
+
+	return func_addr;
+}
+
+/*
+ * find_proc_by_name()
+ *
+ * Given the name of a process, try to find its PID by searching through /proc
+ * and reading /proc/[pid]/exe until we find a process whose name matches the
+ * given process.
+ *
+ * args:
+ * - char* procname: name of the process whose pid to find
+ *
+ * returns:
+ * - a pid_t containing the pid of the process (or -1 if not found)
+ *
+ */
+
+pid_t find_proc_by_name(char *procname)
+{
+	DIR *directory;
+	struct dirent *procDirs;
+	int exePathLen;
+	char *exePath, *exeBuf;
+	ssize_t len;
+	char *exeName, *exeToken;
+
+	if (procname == NULL)
+		return -1;
+
+	directory = opendir("/proc/");
+	if (directory == NULL) {
+		printf("opendir() failed!\n");
+		return -1;
+	}
+
+	while ((procDirs = readdir(directory)) != NULL) {
+		if (procDirs->d_type != DT_DIR)
+			continue;
+
+		pid_t pid = atoi(procDirs->d_name);
+
+		exePathLen = 10 + strlen(procDirs->d_name) + 1;
+		exePath = malloc(exePathLen * sizeof(char));
+		if (exePath == NULL)
+			continue;
+
+		sprintf(exePath, "/proc/%s/exe", procDirs->d_name);
+		exePath[exePathLen-1] = '\0';
+
+		exeBuf = malloc(PATH_MAX * sizeof(char));
+		if (exeBuf == NULL) {
+			free(exePath);
+			continue;
+		}
+
+		len = readlink(exePath, exeBuf, PATH_MAX - 1);
+		if (len == -1) {
+			free(exePath);
+			free(exeBuf);
+			continue;
+		}
+
+		exeBuf[len] = '\0';
+
+		exeName = NULL;
+		exeToken = strtok(exeBuf, "/");
+		while (exeToken) {
+			exeName = exeToken;
+			exeToken = strtok(NULL, "/");
+		}
+
+		if (strcmp(exeName, procname) == 0) {
+			free(exePath);
+			free(exeBuf);
+			closedir(directory);
+			return pid;
+		}
+
+		free(exePath);
+		free(exeBuf);
+	}
+
+	closedir(directory);
+	return -1;
+}
+
+/*
+ * get_proc_elfpath()
+ *
+ * Gets the name of original lib by readlink of /proc/pid/exe.
+ *
+ * args:
+ * - pid_t pid: pid of the process we'd like to find
+ * - char *elfPath: 
+ *
+ * returns:
+ * - success 0; fail -1
+ *
+ */
+
+int get_proc_elfpath(pid_t pid, char **elfpath)
+{
+	FILE *fp;
+	char exename[30];
+	char line[850];
+	int len;
+
+	if (*elfpath == NULL) 
+		return -1;
+
+	sprintf(exename, "/proc/%d/exe", pid);
+
+	len = readlink(exename, *elfpath, PATH_MAX - 1);
+	if (len == -1) {
+		printf("readlink failed %d!\n", errno);
+		return -1;
+	}
+
+	(*elfpath)[len] = '\0';
+	return 0;
+}
+
+/*
+ * get_libpath()
+ *
+ * Gets the name of lib by reading /proc/pid/maps.
+ *
+ * args:
+ * - pid_t pid: pid of the process we'd like to find
+ * - char *libstr: sub-string of libname
+ *
+ * returns:
+ * - a long containing the base address of libc.so inside that process
+ *
+ */
+
+int get_libpath(pid_t pid, char *libstr, char **libpath)
+{
+	FILE *fp;
+	char filename[30];
+	char line[850];
+	int len;
+
+	sprintf(filename, "/proc/%d/maps", pid);
+
+	fp = fopen(filename, "r");
+	if (fp == NULL)
+		return -1;
+
+	while (fgets(line, 850, fp) != NULL) {
+		sscanf(line, "%*lx-%*lx %*s %*s %*s %*d %s", *libpath);
+		if (strstr(line, libstr) != NULL)
+			break;
+	}
+
+	len = strlen(*libpath);
+	(*libpath)[len] = '\0';
+
+	fclose(fp);
 	return 0;
 }
 
 
 /*
- * findRet()
+ * find_ret_inst()
  *
  * Starting at an address somewhere after the end of a function, search for the
  * "ret" instruction that ends it. We do this by searching for a 0xc3 byte, and
@@ -617,14 +702,14 @@ int checkloaded(pid_t pid, char *libname)
  *
  */
 
-unsigned char *findRet(void *endAddr)
+unsigned char *find_ret_inst(void *endaddr)
 {
-	unsigned char *retInstAddr = endAddr;
+	unsigned char *ret_instaddr = endaddr;
 
-	while (*retInstAddr != INTEL_RET_INSTRUCTION)
-		retInstAddr--;
+	while (*ret_instaddr != INTEL_RET_INSTRUCTION)
+		ret_instaddr--;
 
-	return retInstAddr;
+	return ret_instaddr;
 }
 
 
@@ -641,5 +726,5 @@ unsigned char *findRet(void *endAddr)
 
 void usage(char *name)
 {
-	printf("%s [-n process-name] [-p pid] [original-library] [library-to-inject] [function-to-be-raplaced]\n", name);
+	printf("%s [-n process-name] [-p pid] [original-library] [library-to-inject]\n", name);
 }
