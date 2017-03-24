@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <pthread.h>
 
 #include "libsample.h"
 
@@ -34,9 +35,25 @@ void sleepfunc(void)
  * Call sleepfunc(), which loops forever.
  *
  */
+void* thread_test(void* ptr)
+{
+	struct timespec *sleeptime = malloc(sizeof(struct timespec));
+
+	sleeptime->tv_sec = 2;
+	sleeptime->tv_nsec = 0;
+
+	while(1) {
+		printf("i am a child thread\n");
+		nanosleep(sleeptime, NULL);
+	}
+}
 
 int main(void)
 {
+	pthread_t pid;
+
+	pthread_create(&pid, NULL, thread_test, NULL);
 	sleepfunc();
+
 	return 0;
 }
