@@ -14,7 +14,7 @@
 #include "utils.h"
 #include "ptrace.h"
 
-void target_snippet(void) { 
+void target_snippet(void) {
 	asm("push %r9 \n"
 	"callq *%r9 \n"
 	"pop %r9 \n"
@@ -82,25 +82,25 @@ static long get_libc_funcaddr(char *funcname)
 }
 
 /*
- * get_libaddr()
+ * get_base_addr()
  *
- * Gets the base address of libc.so inside a process by reading /proc/pid/maps.
+ * Gets the base address of memory inside a process by reading /proc/pid/maps.
  *
  * args:
- * - pid_t pid: pid of the process whose libc.so base address we'd like to find
- * - char *libstr : subset string of the shared library name
+ * - pid_t pid: pid of the process whose base address we'd like to find
+ * - char *libstr : subset string of the string name
  *
  * returns:
- * - a long containing the base address of libc.so inside that process
+ * - a long containing the base address inside that process
  *
  */
-
-static long get_libaddr(pid_t pid, char *libstr)
+long get_base_addr(pid_t pid, char *libstr, long *len)
 {
 	FILE *fp;
 	char filename[30];
 	char line[850];
-	long addr;
+	long start;
+	long end;
 
 	sprintf(filename, "/proc/%d/maps", pid);
 
@@ -109,13 +109,16 @@ static long get_libaddr(pid_t pid, char *libstr)
 		return -1;
 
 	while (fgets(line, 850, fp) != NULL) {
-		sscanf(line, "%lx-%*lx %*s %*s %*s %*d %*s", &addr);
+		sscanf(line, "%lx-%lx %*s %*s %*s %*d %*s", &start, &end);
 		if (strstr(line, libstr) != NULL)
 			break;
 	}
 
+	if (len != NULL)
+		*len = end - start;
+
 	fclose(fp);
-	return addr;
+	return start;
 }
 
 /*
@@ -197,15 +200,22 @@ static int check_loaded(pid_t pid, char *libname)
 	return -1;
 }
 
-size_t inject_shared_library(pid_t target, char *libname)
+size_t inject_shared_library(pid_t target, char *new_libname, char *orig_libname)
 {
 	char *libpath;
 	int libpath_len;
+	char filename[30];
+	FILE *fp;
+	char line[PATH_MAX];
+	long start, end;
 	pid_t mypid = 0;
 	long my_libcaddr, tgt_libcaddr;
-	long my_mallocaddr, my_freeaddr, my_dlopenaddr;
-	long malloc_offset, free_offset, dlopen_offset;
-	long tgt_mallocaddr, tgt_freeaddr, tgt_dlopenaddr;
+	long my_mallocaddr, my_freeaddr;
+	long my_dlopenaddr, my_munmapaddr;
+	long malloc_offset, free_offset;
+	long dlopen_offset, munmap_offset;
+	long tgt_mallocaddr, tgt_freeaddr;
+	long tgt_dlopenaddr, tgt_munmapaddr;
 	struct user_regs_struct oldregs, regs;
 	struct user_regs_struct target_regs;
 	long addr, curr;
@@ -215,9 +225,9 @@ size_t inject_shared_library(pid_t target, char *libname)
 	char *backup;
 	int error = 0;
 
-	libpath = realpath(libname, NULL);
+	libpath = realpath(new_libname, NULL);
 	if (!libpath) {
-		printf("can't find file \"%s\"\n", libname);
+		printf("can't find file \"%s\"\n", new_libname);
 		return -1;
 	}
 
@@ -225,11 +235,11 @@ size_t inject_shared_library(pid_t target, char *libname)
 
 	mypid = getpid();
 
-	my_libcaddr = get_libaddr(mypid, "libc-");
+	my_libcaddr = get_base_addr(mypid, "libc-", NULL);
 	if (!my_libcaddr)
 		return -1;
 
-	tgt_libcaddr = get_libaddr(target, "libc-");
+	tgt_libcaddr = get_base_addr(target, "libc-", NULL);
 	if (!tgt_libcaddr)
 		return -1;
 
@@ -240,29 +250,25 @@ size_t inject_shared_library(pid_t target, char *libname)
 	my_mallocaddr = get_libc_funcaddr("malloc");
 	my_freeaddr = get_libc_funcaddr("free");
 	my_dlopenaddr = get_libc_funcaddr("__libc_dlopen_mode");
+	my_munmapaddr = get_libc_funcaddr("munmap");
 
 	malloc_offset = my_mallocaddr - my_libcaddr;
 	free_offset = my_freeaddr - my_libcaddr;
 	dlopen_offset = my_dlopenaddr - my_libcaddr;
+	munmap_offset = my_munmapaddr - my_libcaddr;
 
 	/* get the target process' libc function address */
 	tgt_mallocaddr = tgt_libcaddr + malloc_offset;
 	tgt_freeaddr = tgt_libcaddr + free_offset;
 	tgt_dlopenaddr = tgt_libcaddr + dlopen_offset;
+	tgt_munmapaddr = tgt_libcaddr + munmap_offset;
 
 	memset(&oldregs, 0, sizeof(struct user_regs_struct));
 	memset(&regs, 0, sizeof(struct user_regs_struct));
 
-	ptrace_attach(target);
+	//ptrace_attach(target);
 	ptrace_getregs(target, &oldregs);
 	memcpy(&regs, &oldregs, sizeof(struct user_regs_struct));
-
-//	/* check the stack activeness */
-//	curr = oldregs.rip;
-//	if (!check_stack(target, oldregs.rip, origLibName)) {
-//		ptrace_detach(target);
-//		return 1;
-//	}
 
 	/* find a good address and copy target_snippet() to it */
 	addr = get_freespace_addr(target);
@@ -304,11 +310,11 @@ size_t inject_shared_library(pid_t target, char *libname)
 	if (tgt_buf == 0) {
 		error = -1;
 		printf("malloc() failed to allocate memory\n");
-		goto end;
+		goto inject_error;
 	}
 
 	/* malloc() succeeded, copy path of shared lib into the malloc'd
-	 * buffer. 
+	 * buffer.
 	 */
 	ptrace_write(target, tgt_buf, libpath, libpath_len);
 
@@ -328,17 +334,17 @@ size_t inject_shared_library(pid_t target, char *libname)
 	/* if rax is 0 here, dlopen() failed, bail out cleanly. */
 	if (lib_addr == 0) {
 		error = -1;
-		fprintf(stderr, "dlopen() failed to load %s\n", libname);
-		goto end;
+		fprintf(stderr, "dlopen() failed to load %s\n", new_libname);
+		goto inject_error;
 	}
 
 	/* now check /proc/pid/maps to see whether injection succecced. */
-	if (check_loaded(target, libname))
-		printf("\"%s\" successfully injected\n", libname);
+	if (check_loaded(target, new_libname))
+		printf("\"%s\" successfully injected\n", new_libname);
 	else {
 		error = -1;
-		fprintf(stderr, "could not inject \"%s\"\n", libname);
-		goto end;
+		fprintf(stderr, "could not inject \"%s\"\n", new_libname);
+		goto inject_error;
 	}
 
 	/* call free() and we don't care whether this succeeds, so don't
@@ -350,7 +356,37 @@ size_t inject_shared_library(pid_t target, char *libname)
 	ptrace_setregs(target, &regs);
 	ptrace_cont(target);
 
-end:
+
+//	/* call munmap() to free orignal library memory. */
+//	sprintf(filename, "/proc/%d/maps", target);
+//	fp = fopen(filename, "r");
+//	if (fp == NULL)
+//		return -1;
+//
+//	while (fgets(line, 850, fp) != NULL) {
+//		sscanf(line, "%lx-%lx %*s %*s %*s %*d %*s", &start, &end);
+//		if (strstr(line, orig_libname) != NULL) {
+//			regs.rip = addr + 2;
+//			regs.r9 = tgt_munmapaddr;
+//			regs.rdi = start;
+//			regs.rsi = end - start;
+//			ptrace_setregs(target, &regs);
+//			ptrace_cont(target);
+//			memset(&target_regs, 0, sizeof(struct user_regs_struct));
+//			ptrace_getregs(target, &target_regs);
+//			if (target_regs.rax < 0) {
+//				printf("free origlib memory failed\n");
+//				return -1;
+//			}
+//		}
+//	}
+
+	ptrace_write(target, addr, backup, target_snippet_size);
+	ptrace_setregs(target, &oldregs);
+	free(backup);
+	return error;
+
+inject_error:
 	/* restore the old state and detach from the target. */
 	restoreStateAndDetach(target, addr, backup,
 			target_snippet_size, oldregs);
@@ -378,18 +414,14 @@ int check_stack(pid_t pid, long addr, char* libname)
 	char *libpath;
 	long libaddr;
 	int desc;
-
-	/* read function length in .dynsym */
-	Elf_Shdr *dynsym = NULL;
-	Elf_Sym *symbol = NULL;
-	char *name = "libsample";
-	size_t name_index;
+	long liblen;
 
 	libpath = (char *)calloc(1, PATH_MAX * sizeof(char));
-	if (!get_libpath(pid, libname, &libpath))
+	if (get_libpath(pid, libname, &libpath) < 0) {
 		return -1;
+	}
 
-	libaddr = get_libaddr(pid, libname);
+	libaddr = get_base_addr(pid, libname, &liblen);
 	desc = open(libpath, O_RDONLY);
 	if (desc < 0) {
 		fprintf(stderr, "can't open \"%s\"\n", libpath);
@@ -397,47 +429,13 @@ int check_stack(pid_t pid, long addr, char* libname)
 		return -1;
 	}
 
- 	/* get symbol named "name" in the ".dynsym" section */
-	dynsym = (Elf_Shdr *)malloc(sizeof(Elf_Shdr));
-	if (dynsym == NULL) {
-		free(libpath);
-		close(desc);
-		return -errno;
-	}
-	if (section_by_type(desc, SHT_DYNSYM, &dynsym)) {
-		free(libpath);
-		close(desc);
-		free(dynsym);
-		return -errno;
-	}
-
-	symbol = (Elf_Sym *)malloc(sizeof(Elf_Sym));
-	if (symbol == NULL) {
-		free(libpath);
-		close(desc);
-		free(dynsym);
-		return -errno;
-	}
-
-	if (symbol_by_name(desc, dynsym, name, &symbol, &name_index)) {
-		free(libpath);
-		close(desc);
-		free(dynsym);
-		free(symbol);
-		return -errno;
-	}
-
-	func_addr = libaddr + symbol->st_value;
-	func_size = symbol->st_size;
-	
-	if ((addr >= func_addr) && (addr <= func_addr + func_size)) {
+	if ((addr >= libaddr) && (addr <= libaddr + liblen)) {
 		printf("stack safety check failed for \"%d\"\n", pid);
+		return -1;
 	}
-	
+
 	free(libpath);
 	close(desc);
-	free(dynsym);
-	free(symbol);
 	return 0;
 }
 
@@ -457,12 +455,12 @@ long get_tgt_funcaddr(pid_t target, char* funcname, char* libname)
 	if (libpath == NULL)
 		return -1;
 
-	if (get_libpath(target, libname, &libpath)) {
+	if (get_libpath(target, libname, &libpath) < 0) {
 		free(libpath);
 		return -1;
 	}
 
-	libaddr = get_libaddr(target, libname);
+	libaddr = get_base_addr(target, libname, NULL);
 	if (libaddr < 0) {
 		free(libpath);
 		return -1;
@@ -475,7 +473,7 @@ long get_tgt_funcaddr(pid_t target, char* funcname, char* libname)
 		return -1;
 	}
 
- 	/* get symbol named "funcname" in the ".dynsym" section */
+	/* get symbol named "funcname" in the ".dynsym" section */
 	dynsym = (Elf_Shdr *)malloc(sizeof(Elf_Shdr));
 	if (dynsym == NULL) {
 		close(desc);
@@ -607,7 +605,7 @@ pid_t find_proc_by_name(char *procname)
  *
  * args:
  * - pid_t pid: pid of the process we'd like to find
- * - char *elfPath: 
+ * - char *elfPath:
  *
  * returns:
  * - success 0; fail -1
@@ -621,7 +619,7 @@ int get_proc_elfpath(pid_t pid, char **elfpath)
 	char line[850];
 	int len;
 
-	if (*elfpath == NULL) 
+	if (*elfpath == NULL)
 		return -1;
 
 	sprintf(exename, "/proc/%d/exe", pid);
@@ -665,15 +663,18 @@ int get_libpath(pid_t pid, char *libstr, char **libpath)
 
 	while (fgets(line, 850, fp) != NULL) {
 		sscanf(line, "%*lx-%*lx %*s %*s %*s %*d %s", *libpath);
-		if (strstr(line, libstr) != NULL)
-			break;
+		if (strstr(line, libstr) != NULL) {
+			len = strlen(*libpath);
+			(*libpath)[len] = '\0';
+
+			fclose(fp);
+			return 0;
+		}
 	}
 
-	len = strlen(*libpath);
-	(*libpath)[len] = '\0';
-
+	printf("can not find the filepath of %s\n", libstr);
 	fclose(fp);
-	return 0;
+	return -1;
 }
 
 

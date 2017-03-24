@@ -32,7 +32,7 @@ static int parse_args(int argc, char ** argv)
 	if (!strcmp(command, "-n")) {
 		proc_name = command_arg;
 		target = find_proc_by_name(proc_name);
-		if (target == -1) {
+		if (target <= 0) {
 			printf("process %s is not running now\n", proc_name);
 			return -1;
 		}
@@ -53,26 +53,48 @@ static int parse_args(int argc, char ** argv)
 int main(int argc, char **argv)
 {
 	int error = 0;
+	struct user_regs_struct regs;
+	struct symstr_list *tmp;
 
 	INIT_LIST_HEAD(&symstr_l.list);
 
 	if (!parse_args(argc, argv))
 		return -1;
 
-	error = inject_shared_library(target, new_libname);
-	if(error < 0)
-		return error;
-	
-	struct symstr_list *tmp;
 	printf("symbol need to be replaced:\n");
 	if (parse_symbol_list(target, &symstr_l.list, orig_libname) < 0)
 		return -1;
 
+	list_for_each_entry(tmp, &symstr_l.list, list)
+		printf("%s\n", tmp->string);
+
+	ptrace_attach(target);
+
+	/* check the stack activeness */
+	memset(&regs, 0, sizeof(struct user_regs_struct));
+	ptrace_getregs(target, &regs);
+	if (check_stack(target, regs.rip, orig_libname) < 0) {
+		ptrace_detach(target);
+		return -1;
+	}
+
+	error = inject_shared_library(target, new_libname, orig_libname);
+	if(error < 0)
+		return error;
+
+	/* substitute one by one */
 	list_for_each_entry(tmp, &symstr_l.list, list){
 		printf("%s\n", tmp->string);
-		if (elf_hook(target, tmp->string, new_libname, orig_libname) < 0)
+		if (elf_hook(target, tmp->string, new_libname, orig_libname) < 0) {
 			error = -1;
+			break;
+		}
 	}
-		
+
+//	if (error >= 0) {
+//		free_origlib(target, &regs, orig_libname);
+//	}
+
+	ptrace_detach(target);
 	return error;
 }

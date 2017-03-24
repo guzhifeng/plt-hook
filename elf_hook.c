@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <linux/limits.h>
+#include <stdbool.h>
 
 #include "elf_hook.h"
 #include "utils.h"
@@ -25,6 +26,31 @@ static int read_header(int d, Elf_Ehdr **header)
 	return 0;
 }
 
+bool is_shared_object_file(int d)
+{
+	Elf_Ehdr *header = NULL;
+
+	header = (Elf_Ehdr *)malloc(sizeof(Elf_Ehdr));
+	if (header == NULL) {
+		printf("malloc failed!\n");
+		return false;
+	}
+
+	if (read_header(d, &header) < 0) {
+		printf("read elf header failed!\n");
+		free(header);
+		return false;
+	}
+
+	int e_type = header->e_type;
+	free(header);
+
+	if (e_type == ET_DYN)
+		return true;
+	else
+		return false;
+}
+
 static int read_section_table(int d, Elf_Ehdr const *header, Elf_Shdr **table)
 {
 	size_t size;
@@ -34,7 +60,7 @@ static int read_section_table(int d, Elf_Ehdr const *header, Elf_Shdr **table)
 		return errno;
 	}
 
-    	size = header->e_shnum * sizeof(Elf_Shdr);
+	size = header->e_shnum * sizeof(Elf_Shdr);
 
 	if (lseek(d, header->e_shoff, SEEK_SET) < 0)
 		return -errno;
@@ -325,121 +351,6 @@ int symbol_by_name(int d, Elf_Shdr *section, char const *name,
 	return 0;
 }
 
-/*
-int get_module_base_address(char const *elf_name,
-			void *handle, void **base)
-{
-	int desc;
-	Elf_Shdr *dynsym = NULL;
-	Elf_Shdr *strings_section = NULL;
-	char const *strings = NULL;
-	Elf_Sym *symbols = NULL;
-	size_t i, amount;
-	Elf_Sym *found = NULL;
-
-	*base = NULL;
-
-	desc = open(elf_name, O_RDONLY);
-	if (desc < 0)
-		return -errno;
-
-	// get ".dynsym" section
-	dynsym = (Elf_Shdr *)malloc(sizeof(Elf_Shdr));
-	if (dynsym == NULL) {
-		close(desc);
-		return -errno;
-	}
-
-	if (section_by_type(desc, SHT_DYNSYM, &dynsym) < 0) {
-		close(desc);
-		free(dynsym);
-		return -errno;
-	}
-
-	strings_section = (Elf_Shdr *)malloc(sizeof(Elf_Shdr));
-	if (strings_section == NULL) {
-		close(desc);
-		free(dynsym);
-		return -errno;
-	}
-
-	if (section_by_index(desc, dynsym->sh_link, &strings_section) < 0) {
-		close(desc);
-		free(dynsym);
-		free(strings_section);
-	    	return -errno;
-		}
-
-	strings = (char const *)malloc(section->sh_size);
-	if (strings == NULL) {
-		close(desc);
-		free(dynsym);
-		free(strings_section);
-		return -errno;
-	}
-
-	if (read_string_table(desc, strings_section, &strings)) {
-		close(desc);
-		free(dynsym);
-		free(strings_section);
-		free(strings);
-		return -errno;
-	}
-
-	symbols = (Elf_Sym *)malloc(section->sh_size);
-	if (symbols == NULL) {
-		close(desc);
-		free(dynsym);
-		free(strings_section);
-		free(strings);
-		return -errno;
-	}
-
-	if (read_symbol_table(desc, dynsym, &symbols) < 0) {
-		close(desc);
-		free(dynsym);
-		free(strings_section);
-		free((void *)strings);
-		free(symbols);
-
-		return errno;
-	}
-
-	amount = dynsym->sh_size / sizeof(Elf_Sym);
-
-	// Trick to get the module base address in a portable way:
-	// Find the first GLOBAL or WEAK symbol in the symbol table,
-	// look this up with dlsym, then return the difference
-	// as the base address
-
-	for (i = 0; i < amount; ++i) {
-		switch (ELF32_ST_BIND(symbols[i].st_info)) {
-			case STB_GLOBAL:
-			case STB_WEAK:
-				found = &symbols[i];
-				break;
-			default:
-				break;
-	    }
-	}
-
-	if (found != NULL) {
-		const char *name = &strings[found->st_name];
-		void *sym = dlsym(handle, name);
-		if(sym != NULL)
-			*base = (void*)((size_t)sym - found->st_value);
-	}
-
-	close(desc);
-	free(dynsym);
-	free(strings_section);
-	free((void *)strings);
-	free(symbols);
-
-	return *base == NULL;
-}
-*/
-
 int elf_hook(pid_t target, char *funcname, char *new_libname, char *orig_libname) {
 	static size_t pagesize;
 	int desc;
@@ -454,7 +365,7 @@ int elf_hook(pid_t target, char *funcname, char *new_libname, char *orig_libname
 
 	/* symbol table entry for symbol named "name" */
 	Elf_Sym *symbol = NULL;
-	
+
 	/* array with ".rel.plt" entries */
 	Elf_Rel *rel_plt_table = NULL;
 
@@ -462,8 +373,9 @@ int elf_hook(pid_t target, char *funcname, char *new_libname, char *orig_libname
 	i,
 	name_index,  //index of symbol named "name" in ".dyn.sym"
 	rel_plt_amount;  // amount of ".rel.plt" entries
-	
+
 	/* address of relocation for symbol named "name" */
+	void *module_address = NULL;
 	void *name_address;
 
 	/* address of the symbol being substituted */
@@ -494,7 +406,7 @@ int elf_hook(pid_t target, char *funcname, char *new_libname, char *orig_libname
 	if (desc < 0)
 		goto hook_err2;
 
- 	/* get ".dynsym" section */
+	/* get ".dynsym" section */
 	dynsym = (Elf_Shdr *)malloc(sizeof(Elf_Shdr));
 	if (dynsym == NULL)
 		goto hook_err3;
@@ -518,13 +430,15 @@ int elf_hook(pid_t target, char *funcname, char *new_libname, char *orig_libname
 	if (section_by_name(desc, REL_PLT, &rel_plt) < 0)
 		goto hook_err6;
 
+	if (is_shared_object_file(desc))
+		module_address = (void *)get_base_addr(target, tgt_elfpath, NULL);
 	/* get ".rel.dyn" (for 32-bit) or ".rela.dyn" (for 64-bit) section */
 	/* init the ".rel.plt" array and get its size */
-	rel_plt_table = (Elf_Rel *)(rel_plt->sh_addr);
+	rel_plt_table = (Elf_Rel *)((size_t)module_address + rel_plt->sh_addr);
 	rel_plt_amount = rel_plt->sh_size / sizeof(Elf_Rel);
 
-	/* now we've got ".rel.plt" (needed for PIC) table 
-	 * and ".rel.dyn" (for non-PIC) table 
+	/* now we've got ".rel.plt" (needed for PIC) table
+	 * and ".rel.dyn" (for non-PIC) table
 	 * and the symbol's index
 	 * lookup the ".rel.plt" table
 	 */
@@ -536,8 +450,6 @@ int elf_hook(pid_t target, char *funcname, char *new_libname, char *orig_libname
 	if (original == NULL)
 		goto hook_err7;
 
-	ptrace_attach(target);
-
 	for (i = 0; i < rel_plt_amount; ++i) {
 		ptrace_read(target, (unsigned long)&(rel_plt_table[i]), (void *)relplt_t, sizeof(Elf_Rel));
 		/* if we found the symbol to substitute in ".rel.plt" */
@@ -547,13 +459,12 @@ int elf_hook(pid_t target, char *funcname, char *new_libname, char *orig_libname
 		}
 	}
 
-	name_address = (void *)(relplt_t->r_offset);
+	name_address = (void *)(module_address + relplt_t->r_offset);
 	/*save the original function address, and replace it
 	 * with the substitutional
 	 */
 	ptrace_read(target, (unsigned long)name_address, original, sizeof(long));
 	ptrace_write(target, (unsigned long)name_address, subst, sizeof(long));
-	ptrace_detach(target);
 
 	free(original);
 hook_err7:
@@ -585,21 +496,20 @@ int parse_symbol_list(pid_t target, struct list_head *list, char *orig_libname) 
 
 	/* taget process's ".rel.plt" section header */
 	Elf_Shdr *tgt_relplt = NULL;
-	
 
 	size_t i, j;
 	size_t n_origlib_dynsym, n_tgt_relplt;
 
 	Elf_Shdr *tgt_symsect = NULL;
-    	Elf_Shdr *tgt_strsect = NULL;
-    	Elf_Sym *tgt_syms = NULL;
-    	char const *tgt_strs = NULL;
+	Elf_Shdr *tgt_strsect = NULL;
+	Elf_Sym *tgt_syms = NULL;
+	char const *tgt_strs = NULL;
 
-    	Elf_Shdr *origlib_strsect = NULL;
-    	char const * origlib_strs= NULL;
-    	Elf_Sym *origlib_syms = NULL;
+	Elf_Shdr *origlib_strsect = NULL;
+	char const * origlib_strs= NULL;
+	Elf_Sym *origlib_syms = NULL;
 	struct symstr_list *tmp;
-	
+
 	orig_libpath = (char *)calloc(1, PATH_MAX * sizeof(char));
 	if (orig_libpath == NULL) {
 		return -errno;
@@ -609,7 +519,7 @@ int parse_symbol_list(pid_t target, struct list_head *list, char *orig_libname) 
 		free(orig_libpath);
 		return -1;
 	}
-		
+
 	origlib_desc = open(orig_libpath, O_RDONLY);
 	if (origlib_desc < 0) {
 		free(orig_libpath);
@@ -622,7 +532,7 @@ int parse_symbol_list(pid_t target, struct list_head *list, char *orig_libname) 
 	if (origlib_dynsym == NULL)
 		goto err1;
 
- 	/* get orignal library's ".dynsym" section */
+	/* get orignal library's ".dynsym" section */
 	if (section_by_type(origlib_desc, SHT_DYNSYM, &origlib_dynsym) < 0)
 		goto err2;
 
@@ -643,7 +553,7 @@ int parse_symbol_list(pid_t target, struct list_head *list, char *orig_libname) 
 	origlib_syms = (Elf_Sym *)malloc(origlib_dynsym->sh_size);
 	if (origlib_syms == NULL)
 		goto err4;
-		
+
 	if (read_symbol_table(origlib_desc, origlib_dynsym, &origlib_syms) < 0)
 		goto err5;
 
@@ -672,14 +582,14 @@ int parse_symbol_list(pid_t target, struct list_head *list, char *orig_libname) 
 	if (tgt_symsect == NULL)
 		goto err8;
 
-    	if (section_by_index(tgt_desc, tgt_relplt->sh_link, &tgt_symsect) < 0)
+	if (section_by_index(tgt_desc, tgt_relplt->sh_link, &tgt_symsect) < 0)
 		goto err9;
 
 	tgt_strsect = (Elf_Shdr *)malloc(sizeof(Elf_Shdr));
 	if (tgt_strsect == NULL)
 		goto err9;
 
-    	if (section_by_index(tgt_desc, tgt_symsect->sh_link, &tgt_strsect) < 0)
+	if (section_by_index(tgt_desc, tgt_symsect->sh_link, &tgt_strsect) < 0)
 		goto err10;
 
 	tgt_relplt_t = (Elf_Rel *)malloc(tgt_relplt->sh_size);
@@ -695,29 +605,29 @@ int parse_symbol_list(pid_t target, struct list_head *list, char *orig_libname) 
 
 	if (read_symbol_table(tgt_desc, tgt_symsect, &tgt_syms) < 0)
 		goto err12;
-	
+
 	tgt_strs = (char const *)malloc(tgt_strsect->sh_size);
 	if (tgt_strs == NULL)
 		goto err12;
 
 	if (read_string_table(tgt_desc, tgt_strsect, &tgt_strs))
 		goto err13;
-	
+
 	n_origlib_dynsym = origlib_dynsym->sh_size / origlib_dynsym->sh_entsize;
 	n_tgt_relplt = tgt_relplt->sh_size / tgt_relplt->sh_entsize;
 
-   	for (i = 0; i < n_tgt_relplt; ++i) {
+	for (i = 0; i < n_tgt_relplt; ++i) {
 		long index = (tgt_syms + ELF64_R_SYM(tgt_relplt_t[i].r_info))->st_name;
 		for (j = 0; j < n_origlib_dynsym; ++j) {
-        		if (!strcmp(&tgt_strs[index], &origlib_strs[origlib_syms[j].st_name])
+			if (!strcmp(&tgt_strs[index], &origlib_strs[origlib_syms[j].st_name])
 					&& origlib_syms[j].st_size) {
 				tmp = (struct symstr_list *)malloc(sizeof(struct symstr_list));
 				tmp->string = (char *)malloc(strlen(&tgt_strs[index]) +1 );
 				memcpy(tmp->string, &tgt_strs[index], strlen(&tgt_strs[index]) + 1);
 				list_add_tail(&(tmp->list), list);
 			}
-	    	}
-    	}
+		}
+	}
 
 err13:
 	free((void *)tgt_strs);
