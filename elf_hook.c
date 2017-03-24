@@ -281,7 +281,7 @@ int symbol_by_name(int d, Elf_Shdr *section, char const *name,
 		return -errno;
 	}
 
-	strings = (char const *)malloc(section->sh_size);
+	strings = (char const *)malloc(strings_section->sh_size);
 	if (strings == NULL) {
 		free(strings_section);
 		return -errno;
