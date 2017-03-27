@@ -357,29 +357,29 @@ size_t inject_shared_library(pid_t target, char *new_libname, char *orig_libname
 	ptrace_cont(target);
 
 
-//	/* call munmap() to free orignal library memory. */
-//	sprintf(filename, "/proc/%d/maps", target);
-//	fp = fopen(filename, "r");
-//	if (fp == NULL)
-//		return -1;
-//
-//	while (fgets(line, 850, fp) != NULL) {
-//		sscanf(line, "%lx-%lx %*s %*s %*s %*d %*s", &start, &end);
-//		if (strstr(line, orig_libname) != NULL) {
-//			regs.rip = addr + 2;
-//			regs.r9 = tgt_munmapaddr;
-//			regs.rdi = start;
-//			regs.rsi = end - start;
-//			ptrace_setregs(target, &regs);
-//			ptrace_cont(target);
-//			memset(&target_regs, 0, sizeof(struct user_regs_struct));
-//			ptrace_getregs(target, &target_regs);
-//			if (target_regs.rax < 0) {
-//				printf("free origlib memory failed\n");
-//				return -1;
-//			}
-//		}
-//	}
+	/* call munmap() to free orignal library memory. */
+	sprintf(filename, "/proc/%d/maps", target);
+	fp = fopen(filename, "r");
+	if (fp == NULL)
+		return -1;
+
+	while (fgets(line, 850, fp) != NULL) {
+		sscanf(line, "%lx-%lx %*s %*s %*s %*d %*s", &start, &end);
+		if (strstr(line, orig_libname) != NULL) {
+			regs.rip = addr + 2;
+			regs.r9 = tgt_munmapaddr;
+			regs.rdi = start;
+			regs.rsi = end - start;
+			ptrace_setregs(target, &regs);
+			ptrace_cont(target);
+			memset(&target_regs, 0, sizeof(struct user_regs_struct));
+			ptrace_getregs(target, &target_regs);
+			if (target_regs.rax < 0) {
+				printf("free origlib memory failed\n");
+				return -1;
+			}
+		}
+	}
 
 	ptrace_write(target, addr, backup, target_snippet_size);
 	ptrace_setregs(target, &oldregs);
