@@ -322,7 +322,7 @@ size_t inject_shared_library(pid_t target, char *new_libname, char *orig_libname
 	regs.rip = addr + 2;
 	regs.r9 = tgt_dlopenaddr;
 	regs.rdi = tgt_buf;
-	regs.rsi = 1;
+	regs.rsi = RTLD_NOW;
 
 	ptrace_setregs(target, &regs);
 	ptrace_cont(target);
