@@ -250,10 +250,3 @@ void checktargetsig(pid_t target)
  *
  */
 
-void restoreStateAndDetach(pid_t target, unsigned long addr, void *backup,
-		int datasize, struct REG_TYPE oldregs)
-{
-	ptrace_write(target, addr, backup, datasize);
-	ptrace_setregs(target, &oldregs);
-	ptrace_detach(target);
-}

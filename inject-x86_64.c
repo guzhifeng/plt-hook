@@ -4,7 +4,6 @@
 #include <unistd.h>
 #include <sys/user.h>
 #include <wait.h>
-
 #include "utils.h"
 #include "ptrace.h"
 #include "elf_hook.h"
@@ -46,14 +45,11 @@ static int parse_args(int argc, char ** argv)
 		usage(argv[0]);
 		return -1;
 	}
-
-
 }
 
 int main(int argc, char **argv)
 {
 	int error = 0;
-	struct user_regs_struct regs;
 	struct symstr_list *tmp;
 
 	INIT_LIST_HEAD(&symstr_l.list);
@@ -68,13 +64,11 @@ int main(int argc, char **argv)
 	list_for_each_entry(tmp, &symstr_l.list, list)
 		printf("%s\n", tmp->string);
 
-	ptrace_attach(target);
+	if (stop_tgt_threads(target) < 0)
+		return -1;
 
-	/* check the stack activeness */
-	memset(&regs, 0, sizeof(struct user_regs_struct));
-	ptrace_getregs(target, &regs);
-	if (check_stack(target, regs.rip, orig_libname) < 0) {
-		ptrace_detach(target);
+	/* check the target process's stack activeness */
+	if (check_tgt_stack(target, orig_libname) < 0) {
 		return -1;
 	}
 
@@ -91,10 +85,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-//	if (error >= 0) {
-//		free_origlib(target, &regs, orig_libname);
-//	}
-
-	ptrace_detach(target);
+	start_tgt_threads(target);
 	return error;
 }

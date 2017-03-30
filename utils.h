@@ -5,14 +5,15 @@
 #include "ptrace.h"
 struct symstr_list{
 	char *string;
-    	struct list_head list;
+	struct list_head list;
 };
 
-int free_origlib(pid_t target, struct user_regs_struct *regs, char *libname);
 void target_snippet(void);
 void target_snippet_end();
+int stop_tgt_threads(pid_t target);
+int start_tgt_threads(pid_t target);
 size_t inject_shared_library(pid_t target, char *new_libname, char *orig_libname);
-int check_stack(pid_t pid, long addr, char* libname);
+int check_tgt_stack(pid_t pid, char* libname);
 long get_tgt_funcaddr(pid_t target, char* funcname, char* libname);
 pid_t find_proc_by_name(char* procname);
 long get_base_addr(pid_t pid, char *libstr, long *len);

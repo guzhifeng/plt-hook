@@ -24,6 +24,176 @@ void target_snippet(void) {
 void target_snippet_end() {
 }
 
+/* Similar to getline(), except gets process pid task IDs.
+ * Returns positive (number of TIDs in list) if success,
+ * otherwise 0 with errno set. */
+static size_t get_tids(pid_t **const listptr, size_t *const sizeptr, const pid_t pid)
+{
+	char dirname[64];
+	DIR *dir;
+	pid_t *list;
+	size_t size, used = 0;
+
+	if (!listptr || !sizeptr || pid < (pid_t)1) {
+		errno = EINVAL;
+		return (size_t)0;
+	}
+
+	if (*sizeptr > 0) {
+		list = *listptr;
+		size = *sizeptr;
+	} else {
+		list = *listptr = NULL;
+		size = *sizeptr = 0;
+	}
+
+	if (snprintf(dirname, sizeof dirname, "/proc/%d/task/",
+				(int)pid) >= (int)sizeof dirname) {
+		errno = ENOTSUP;
+		return (size_t)0;
+	}
+
+	dir = opendir(dirname);
+	if (!dir) {
+		errno = ESRCH;
+		return (size_t)0;
+	}
+
+	while (1) {
+		struct dirent *ent;
+		int            value;
+		char           dummy;
+
+		errno = 0;
+		ent = readdir(dir);
+		if (!ent)
+			break;
+
+		/* Parse TIDs. Ignore non-numeric entries. */
+		if (sscanf(ent->d_name, "%d%c", &value, &dummy) != 1)
+			continue;
+
+		/* Ignore obviously invalid entries. */
+		if (value < 1)
+			continue;
+
+		/* Make sure there is room for another TID. */
+		if (used >= size) {
+			size = (used | 127) + 128;
+			list = realloc(list, size * sizeof list[0]);
+			if (!list) {
+				closedir(dir);
+				errno = ENOMEM;
+				return (size_t)0;
+			}
+
+			*listptr = list;
+			*sizeptr = size;
+		}
+
+		/* Add to list. */
+		list[used++] = (pid_t)value;
+	}
+	if (errno) {
+		const int saved_errno = errno;
+		closedir(dir);
+		errno = saved_errno;
+		return (size_t)0;
+	}
+
+	if (closedir(dir)) {
+		errno = EIO;
+		return (size_t)0;
+	}
+
+	/* None? */
+	if (used < 1) {
+		errno = ESRCH;
+		return (size_t)0;
+	}
+
+	/* Make sure there is room for a terminating (pid_t)0. */
+	if (used >= size) {
+		size = used + 1;
+		list = realloc(list, size * sizeof list[0]);
+		if (!list) {
+			errno = ENOMEM;
+			return (size_t)0;
+		}
+		*listptr = list;
+		*sizeptr = size;
+	}
+
+	/* Terminate list; done. */
+	list[used] = (pid_t)0;
+	errno = 0;
+	return used;
+}
+
+int stop_tgt_threads(pid_t target)
+{
+	pid_t *tid = 0;
+	size_t tids = 0;
+	size_t tids_max = 0;
+	size_t t;
+	long r;
+
+	/* Obtain task IDs. */
+	tids = get_tids(&tid, &tids_max, target);
+	if (!tids) {
+		printf("find tids error\n");
+		return -1;
+	}
+
+	printf("process %d has %d tasks\n", (int)target, (int)tids);
+
+	/* Attach to all tasks. */
+	for (t = 0; t < tids; t++) {
+		if (ptrace(PTRACE_ATTACH, tid[t], NULL, NULL) == -1) {
+			printf("%d ptrace(PTRACE_ATTACH) failed\n", tid[t]);
+			for(t--; t>0; t--) {
+			        if (ptrace(PTRACE_DETACH, tid[t], NULL, NULL) == -1) {
+					printf("%d ptrace(PTRACE_DETACH) failed\n", tid[t]);
+					return -1;
+				}
+			}
+
+			return -1;
+		}
+
+	}
+
+	printf("attached to all threads.\n");
+	return 1;
+}
+
+int start_tgt_threads(pid_t target)
+{
+	pid_t *tid = 0;
+	size_t tids = 0;
+	size_t tids_max = 0;
+	size_t t;
+	int   status;
+
+	/* Obtain task IDs. */
+	tids = get_tids(&tid, &tids_max, target);
+	if (!tids) {
+		printf("find tids error\n");
+		return -1;
+	}
+
+	/* Detach all tasks. */
+	for (t = 0; t < tids; t++) {
+	        if (ptrace(PTRACE_DETACH, tid[t], (void *)0, (void *)0) == -1){
+			fprintf(stderr, "%d ptrace(PTRACE_DETACH) failed\n", tid[t]);
+			return -1;
+		}
+
+	}
+
+	return 1;
+}
+
 static void inject_target_snippet(pid_t target, long addr, char *backup, size_t code_len)
 {
 	intptr_t target_snippet_ret;
@@ -198,6 +368,12 @@ static int check_loaded(pid_t pid, char *libname)
 
 	fclose(fp);
 	return -1;
+}
+
+void restore_tgt_state(pid_t target, unsigned long addr, void *backup, int datasize, struct REG_TYPE oldregs)
+{
+	ptrace_write(target, addr, backup, datasize);
+	ptrace_setregs(target, &oldregs);
 }
 
 size_t inject_shared_library(pid_t target, char *new_libname, char *orig_libname)
@@ -388,14 +564,15 @@ size_t inject_shared_library(pid_t target, char *new_libname, char *orig_libname
 
 inject_error:
 	/* restore the old state and detach from the target. */
-	restoreStateAndDetach(target, addr, backup,
+	restore_tgt_state(target, addr, backup,
 			target_snippet_size, oldregs);
+	start_tgt_threads(target);
 	free(backup);
 	return error;
 }
 
 /*
- * check_stack()
+ * check_tgt_stack()
  *
  * Check the target stack frame to make sure it is safe to replace the function.
  *
@@ -408,20 +585,26 @@ inject_error:
  * - a pid_t containing the pid of the process (or -1 if not found)
  *
  */
-int check_stack(pid_t pid, long addr, char* libname)
+int check_tgt_stack(pid_t target, char* libname)
 {
 	long func_addr, func_size;
 	char *libpath;
 	long libaddr;
 	int desc;
 	long liblen;
+	struct user_regs_struct regs;
+	long addr;
+	pid_t *tid = 0;
+	size_t tids = 0;
+	size_t tids_max = 0;
+	size_t t;
 
 	libpath = (char *)calloc(1, PATH_MAX * sizeof(char));
-	if (get_libpath(pid, libname, &libpath) < 0) {
+	if (get_libpath(target, libname, &libpath) < 0) {
 		return -1;
 	}
 
-	libaddr = get_base_addr(pid, libname, &liblen);
+	libaddr = get_base_addr(target, libname, &liblen);
 	desc = open(libpath, O_RDONLY);
 	if (desc < 0) {
 		fprintf(stderr, "can't open \"%s\"\n", libpath);
@@ -429,9 +612,27 @@ int check_stack(pid_t pid, long addr, char* libname)
 		return -1;
 	}
 
-	if ((addr >= libaddr) && (addr <= libaddr + liblen)) {
-		printf("stack safety check failed for \"%d\"\n", pid);
+	/* Obtain task IDs. */
+	tids = get_tids(&tid, &tids_max, target);
+	if (!tids) {
+		printf("find tids error\n");
 		return -1;
+	}
+
+	/* check all tasks stack activeness. */
+	for (t = 0; t < tids; t++) {
+		memset(&regs, 0, sizeof(struct user_regs_struct));
+		ptrace_getregs(tid[t], &regs);
+		addr = regs.rip;
+
+		if ((addr >= libaddr) && (addr <= libaddr + liblen)) {
+			printf("stack safety check failed for \"%d\"\n", target);
+			/* Detach all tasks. */
+			start_tgt_threads(target);
+			free(libpath);
+			close(desc);
+			return -1;
+		}
 	}
 
 	free(libpath);
