@@ -63,8 +63,10 @@ int main(int argc, char **argv)
 		return -1;
 
 	printf("symbol need to be replaced:\n");
-	if (parse_symbol_list(target, &symstr_l.list, orig_libname) < 0)
+	if (parse_symbol_list(target, &symstr_l.list, orig_libname) < 0) {
+		printf("no symbol need to be replaced, just return.\n");
 		return -1;
+	}
 
 	list_for_each_entry(tmp, &symstr_l.list, list)
 		printf("%s\n", tmp->string);
