@@ -40,6 +40,11 @@ static int parse_args(int argc, char ** argv)
 				proc_name, target);
 	} else if (!strcmp(command, "-p")) {
 		target = atoi(command_arg);
+		if ((target <= 0) || (kill(target, 0) < 0)) {
+			printf("process [%d] is not running now\n", target);
+			return -1;
+		}
+
 		printf("targeting process with pid %d\n", target);
 	} else {
 		usage(argv[0]);
@@ -54,7 +59,7 @@ int main(int argc, char **argv)
 
 	INIT_LIST_HEAD(&symstr_l.list);
 
-	if (!parse_args(argc, argv))
+	if (parse_args(argc, argv) < 0)
 		return -1;
 
 	printf("symbol need to be replaced:\n");
