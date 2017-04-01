@@ -1,3 +1,4 @@
+#include <errno.h>
 #include "ptrace.h"
 
 /*
@@ -11,19 +12,21 @@
  *
  */
 
-void ptrace_attach(pid_t target)
+int ptrace_attach(pid_t target)
 {
 	int waitpidstatus;
 
 	if (ptrace(PTRACE_ATTACH, target, NULL, NULL) == -1) {
 		fprintf(stderr, "ptrace(PTRACE_ATTACH) failed\n");
-		exit(1);
+		return -errno;
 	}
 
 	if (waitpid(target, &waitpidstatus, WUNTRACED) != target) {
 		fprintf(stderr, "waitpid(%d) failed\n", target);
-		exit(1);
+		return -errno;
 	}
+
+	return 0;
 }
 
 /*
@@ -37,12 +40,14 @@ void ptrace_attach(pid_t target)
  *
  */
 
-void ptrace_detach(pid_t target)
+int ptrace_detach(pid_t target)
 {
 	if (ptrace(PTRACE_DETACH, target, NULL, NULL) == -1) {
 		fprintf(stderr, "ptrace(PTRACE_DETACH) failed\n");
-		exit(1);
+		return -errno;
 	}
+
+	return 0;
 }
 
 /*
@@ -59,12 +64,14 @@ void ptrace_detach(pid_t target)
  *
  */
 
-void ptrace_getregs(pid_t target, struct REG_TYPE *regs)
+int ptrace_getregs(pid_t target, struct REG_TYPE *regs)
 {
 	if (ptrace(PTRACE_GETREGS, target, NULL, regs) == -1) {
 		fprintf(stderr, "ptrace(PTRACE_GETREGS) failed\n");
-		exit(1);
+		return -errno;
 	}
+
+	return 0;
 }
 
 /*
@@ -79,7 +86,7 @@ void ptrace_getregs(pid_t target, struct REG_TYPE *regs)
  *
  */
 
-void ptrace_cont(pid_t target)
+int ptrace_cont(pid_t target)
 {
 	struct timespec *sleeptime = malloc(sizeof(struct timespec));
 
@@ -88,13 +95,17 @@ void ptrace_cont(pid_t target)
 
 	if (ptrace(PTRACE_CONT, target, NULL, NULL) == -1) {
 		fprintf(stderr, "ptrace(PTRACE_CONT) failed\n");
-		exit(1);
+		return -errno;
 	}
 
 	nanosleep(sleeptime, NULL);
 
 	/* make sure the target process received SIGTRAP after stopping. */
-	checktargetsig(target);
+	if ((checktargetsig(target)) < 0) {
+		printf("checktargetsig failed, wait longer please!\n");
+		return -1;
+	}
+	return 0;
 }
 
 /*
@@ -110,12 +121,14 @@ void ptrace_cont(pid_t target)
  *
  */
 
-void ptrace_setregs(pid_t target, struct REG_TYPE *regs)
+int ptrace_setregs(pid_t target, struct REG_TYPE *regs)
 {
 	if (ptrace(PTRACE_SETREGS, target, NULL, regs) == -1) {
 		fprintf(stderr, "ptrace(PTRACE_SETREGS) failed\n");
-		exit(1);
+		return -errno;
 	}
+
+	return 0;
 }
 
 /*
@@ -134,15 +147,14 @@ void ptrace_setregs(pid_t target, struct REG_TYPE *regs)
  *
  */
 
-siginfo_t ptrace_getsiginfo(pid_t target)
+int ptrace_getsiginfo(pid_t target, siginfo_t *targetsig)
 {
-	siginfo_t targetsig;
-
-	if (ptrace(PTRACE_GETSIGINFO, target, NULL, &targetsig) == -1) {
+	if (ptrace(PTRACE_GETSIGINFO, target, NULL, targetsig) == -1) {
 		fprintf(stderr, "ptrace(PTRACE_GETSIGINFO) failed\n");
-		exit(1);
+		return -errno;
 	}
-	return targetsig;
+
+	return 0;
 }
 
 /*
@@ -158,7 +170,7 @@ siginfo_t ptrace_getsiginfo(pid_t target)
  *
  */
 
-void ptrace_read(int pid, unsigned long addr, void *vptr, int len)
+int ptrace_read(int pid, unsigned long addr, void *vptr, int len)
 {
 	int bytesRead = 0;
 	int i = 0;
@@ -169,11 +181,13 @@ void ptrace_read(int pid, unsigned long addr, void *vptr, int len)
 		word = ptrace(PTRACE_PEEKTEXT, pid, addr + bytesRead, NULL);
 		if (word == -1) {
 			fprintf(stderr, "ptrace(PTRACE_PEEKTEXT) failed\n");
-			exit(1);
+			return -errno;
 		}
 		bytesRead += sizeof(word);
 		ptr[i++] = word;
 	}
+
+	return 0;
 }
 
 /*
@@ -190,7 +204,7 @@ void ptrace_read(int pid, unsigned long addr, void *vptr, int len)
  *
  */
 
-void ptrace_write(int pid, unsigned long addr, void *vptr, int len)
+int ptrace_write(int pid, unsigned long addr, void *vptr, int len)
 {
 	int byteCount = 0;
 	long word = 0;
@@ -200,10 +214,12 @@ void ptrace_write(int pid, unsigned long addr, void *vptr, int len)
 		word = ptrace(PTRACE_POKETEXT, pid, addr + byteCount, word);
 		if (word == -1) {
 			fprintf(stderr, "ptrace(PTRACE_POKETEXT) failed\n");
-			exit(1);
+			return -errno;
 		}
 		byteCount += sizeof(word);
 	}
+
+	return 0;
 }
 
 /*
@@ -219,34 +235,21 @@ void ptrace_write(int pid, unsigned long addr, void *vptr, int len)
  *
  */
 
-void checktargetsig(pid_t target)
+int checktargetsig(pid_t target)
 {
+	siginfo_t targetsig;
 	/* check the signal that the child stopped with. */
-	siginfo_t targetsig = ptrace_getsiginfo(target);
+	if (ptrace_getsiginfo(target, &targetsig) < 0)
+		return -errno;
 
 	/* if it's not SIGTRAP, something wrong(most likely a segfault). */
 	if (targetsig.si_signo != SIGTRAP) {
 		printf("expected SIGTRAP, but target stopped with sig %d: %s\n",
 			targetsig.si_signo, strsignal(targetsig.si_signo));
-		printf("sending proc %d a SIGSTOP signal for debugging\n", target);
-		ptrace(PTRACE_CONT, target, NULL, SIGSTOP);
-		exit(1);
+		printf("sending proc %d a SIGSTOP for debugging\n", target);
+		if (ptrace(PTRACE_CONT, target, NULL, SIGSTOP) == -1)
+			return -errno;
 	}
+
+	return 0;
 }
-
-/*
- * restoreStateAndDetach()
- *
- * Once we're done debugging a target process, restore the process' backed-up
- * data and register state and let it go on its merry way.
- *
- * args:
- * - pid_t target: pid of the target process
- * - unsigned long addr: address within the target's address space to write
- *   backed-up data to
- * - void* backup: a buffer pointing to the backed-up data
- * - int datasize: the amount of backed-up data to write
- * - struct REG_TYPE oldregs: backed-up register state to restore
- *
- */
-
