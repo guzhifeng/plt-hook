@@ -1,5 +1,5 @@
-linux-inject
-Copyright (C) 2015 Tyler Colgan
+plt-hook
+Copyright (C) 2017 Zhang Zhuoyu
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
