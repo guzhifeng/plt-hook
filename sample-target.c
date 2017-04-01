@@ -22,7 +22,7 @@ void sleepfunc(void)
 	sleeptime->tv_nsec = 0;
 
 	while (1) {
-		printf("result = %d\n", libsample(1, 2, 4));
+		printf("main thread: result = %d\n", libsample(1, 2, 4));
 		nanosleep(sleeptime, NULL);
 	}
 
@@ -43,7 +43,7 @@ void *thread_test(void *ptr)
 	sleeptime->tv_nsec = 0;
 
 	while (1) {
-		printf("i am a child thread\n");
+		printf("child thread: result = %d\n", libsample(1, 2, 4));
 		nanosleep(sleeptime, NULL);
 	}
 }
