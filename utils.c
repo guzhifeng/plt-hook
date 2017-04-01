@@ -14,20 +14,22 @@
 #include "utils.h"
 #include "ptrace.h"
 
-void target_snippet(void) {
+void target_snippet(void)
+{
 	asm("push %r9 \n"
 	"callq *%r9 \n"
 	"pop %r9 \n"
 	);
 }
 
-void target_snippet_end() {
+void target_snippet_end(void)
+{
 }
 
 /* Similar to getline(), except gets process pid task IDs.
  * Returns positive (number of TIDs in list) if success,
  * otherwise 0 with errno set. */
-static size_t get_tids(pid_t **const listptr, size_t *const sizeptr, const pid_t pid)
+static size_t get_tids(pid_t **const listptr, size_t *const sizeptr, pid_t pid)
 {
 	char dirname[64];
 	DIR *dir;
@@ -47,8 +49,8 @@ static size_t get_tids(pid_t **const listptr, size_t *const sizeptr, const pid_t
 		size = *sizeptr = 0;
 	}
 
-	if (snprintf(dirname, sizeof dirname, "/proc/%d/task/",
-				(int)pid) >= (int)sizeof dirname) {
+	if (snprintf(dirname, sizeof(dirname), "/proc/%d/task/",
+				(int)pid) >= (int)sizeof(dirname)) {
 		errno = ENOTSUP;
 		return (size_t)0;
 	}
@@ -80,7 +82,7 @@ static size_t get_tids(pid_t **const listptr, size_t *const sizeptr, const pid_t
 		/* Make sure there is room for another TID. */
 		if (used >= size) {
 			size = (used | 127) + 128;
-			list = realloc(list, size * sizeof list[0]);
+			list = realloc(list, size * sizeof(list[0]));
 			if (!list) {
 				closedir(dir);
 				errno = ENOMEM;
@@ -115,7 +117,7 @@ static size_t get_tids(pid_t **const listptr, size_t *const sizeptr, const pid_t
 	/* Make sure there is room for a terminating (pid_t)0. */
 	if (used >= size) {
 		size = used + 1;
-		list = realloc(list, size * sizeof list[0]);
+		list = realloc(list, size * sizeof(list[0]));
 		if (!list) {
 			errno = ENOMEM;
 			return (size_t)0;
@@ -149,13 +151,10 @@ int stop_tgt_threads(pid_t target)
 
 	/* Attach to all tasks. */
 	for (t = 0; t < tids; t++) {
-		if (ptrace(PTRACE_ATTACH, tid[t], NULL, NULL) == -1) {
-			printf("%d ptrace(PTRACE_ATTACH) failed\n", tid[t]);
-			for(t--; t>0; t--) {
-			        if (ptrace(PTRACE_DETACH, tid[t], NULL, NULL) == -1) {
-					printf("%d ptrace(PTRACE_DETACH) failed\n", tid[t]);
+		if (ptrace_attach(tid[t]) < 0) {
+			for (t--; t > 0; t--) {
+				if (ptrace_detach(tid[t]) < 0)
 					return -1;
-				}
 			}
 
 			return -1;
@@ -184,17 +183,16 @@ int start_tgt_threads(pid_t target)
 
 	/* Detach all tasks. */
 	for (t = 0; t < tids; t++) {
-	        if (ptrace(PTRACE_DETACH, tid[t], (void *)0, (void *)0) == -1){
-			fprintf(stderr, "%d ptrace(PTRACE_DETACH) failed\n", tid[t]);
+		if (ptrace_detach(tid[t]) < 0)
 			return -1;
-		}
-
 	}
 
+	printf("detached from all threads.\n");
 	return 1;
 }
 
-static void inject_target_snippet(pid_t target, long addr, char *backup, size_t code_len)
+static int inject_target_snippet(pid_t target, long addr,
+		char *backup, size_t code_len)
 {
 	intptr_t target_snippet_ret;
 	char *newcode;
@@ -211,7 +209,8 @@ static void inject_target_snippet(pid_t target, long addr, char *backup, size_t 
 		(intptr_t)target_snippet;
 
 	/* back up whatever data at the address we want to modify. */
-	ptrace_read(target, addr, backup, code_len);
+	if (ptrace_read(target, addr, backup, code_len) < 0)
+		goto snippet_err;
 
 	/* set up a buffer and copy target_snippet() code into the
 	 * target process.
@@ -220,12 +219,22 @@ static void inject_target_snippet(pid_t target, long addr, char *backup, size_t 
 	memcpy(newcode, target_snippet, code_len - 1);
 	/* overwrite the RET instruction with an INT 3. */
 	newcode[target_snippet_ret] = INTEL_INT3_INSTRUCTION;
+	if (newcode == NULL)
+		goto snippet_err;
 
 	/* copy target_snippet()'s code to the target address inside the
 	 * target process' address space.
 	 */
-	ptrace_write(target, addr, newcode, code_len);
-	free(newcode);
+	if (ptrace_write(target, addr, newcode, code_len) < 0) {
+		free(newcode);
+		goto snippet_err;
+	}
+
+	return 0;
+
+snippet_err:
+	printf("inject target snippet failed!\n");
+	return -errno;
 }
 
 /*
@@ -361,22 +370,26 @@ static int check_loaded(pid_t pid, char *libname)
 	while (fgets(line, 850, fp) != NULL) {
 		sscanf(line, "%lx-%*lx %*s %*s %*s %*d", &addr);
 		if (strstr(line, libname) != NULL) {
+			printf("\"%s\" successfully injected\n", libname);
 			fclose(fp);
-			return 1;
+			return 0;
 		}
 	}
 
+	fprintf(stderr, "could not inject \"%s\"\n", libname);
 	fclose(fp);
 	return -1;
 }
 
-void restore_tgt_state(pid_t target, unsigned long addr, void *backup, int datasize, struct REG_TYPE oldregs)
+void restore_tgt_state(pid_t target, unsigned long addr, void *backup,
+		int datasize, struct REG_TYPE oldregs)
 {
 	ptrace_write(target, addr, backup, datasize);
 	ptrace_setregs(target, &oldregs);
 }
 
-size_t inject_shared_library(pid_t target, char *new_libname, char *orig_libname)
+size_t inject_shared_library(pid_t target, char *new_libname,
+		char *orig_libname)
 {
 	char *libpath;
 	int libpath_len;
@@ -399,25 +412,24 @@ size_t inject_shared_library(pid_t target, char *new_libname, char *orig_libname
 	unsigned long long tgt_buf;
 	unsigned long long lib_addr;
 	char *backup;
-	int error = 0;
+
+	mypid = getpid();
 
 	libpath = realpath(new_libname, NULL);
 	if (!libpath) {
 		printf("can't find file \"%s\"\n", new_libname);
-		return -1;
+		goto inject_err1;
 	}
 
 	libpath_len = strlen(libpath) + 1;
 
-	mypid = getpid();
-
 	my_libcaddr = get_base_addr(mypid, "libc-", NULL);
 	if (!my_libcaddr)
-		return -1;
+		goto inject_err1;
 
 	tgt_libcaddr = get_base_addr(target, "libc-", NULL);
 	if (!tgt_libcaddr)
-		return -1;
+		goto inject_err1;
 
 	/* find the addresses of the syscalls that we'd like to use inside the
 	 * target, use the base address of libc of THIS process to calculate
@@ -442,25 +454,27 @@ size_t inject_shared_library(pid_t target, char *new_libname, char *orig_libname
 	memset(&oldregs, 0, sizeof(struct user_regs_struct));
 	memset(&regs, 0, sizeof(struct user_regs_struct));
 
-	//ptrace_attach(target);
-	ptrace_getregs(target, &oldregs);
+	if (ptrace_getregs(target, &oldregs) < 0)
+		goto inject_err1;
+
 	memcpy(&regs, &oldregs, sizeof(struct user_regs_struct));
 
 	/* find a good address and copy target_snippet() to it */
 	addr = get_freespace_addr(target);
 	if (!addr)
-		return -1;
+		goto inject_err1;
 
 	addr += sizeof(long);
 
 	target_snippet_size = (intptr_t)target_snippet_end -
 		(intptr_t)target_snippet;
 	backup = calloc(1, target_snippet_size * sizeof(char));
-	if (backup == NULL) {
-		return -errno;
-	}
+	if (backup == NULL)
+		goto inject_err1;
 
-	inject_target_snippet(target, addr, backup, target_snippet_size);
+	if (inject_target_snippet(target, addr, backup,
+				target_snippet_size) < 0)
+		goto inject_err2;
 
 	/* set the target's rip to it. we have to advance by 2 bytes here
 	 * because rip gets incremented by the size of the current instruction,
@@ -474,25 +488,29 @@ size_t inject_shared_library(pid_t target, char *new_libname, char *orig_libname
 	regs.rip = addr + 2;
 	regs.r9 = tgt_mallocaddr;
 	regs.rdi = libpath_len;
-	ptrace_setregs(target, &regs);
+	if (ptrace_setregs(target, &regs) < 0)
+		goto inject_err3;
 
 	/* call malloc() */
-	ptrace_cont(target);
+	if (ptrace_cont(target) < 0)
+		goto inject_err3;
 
 	/* the target process malloc() returns. check wether it succeeded */
 	memset(&target_regs, 0, sizeof(struct user_regs_struct));
-	ptrace_getregs(target, &target_regs);
+	if (ptrace_getregs(target, &target_regs) < 0)
+		goto inject_err3;
+
 	tgt_buf = target_regs.rax;
 	if (tgt_buf == 0) {
-		error = -1;
 		printf("malloc() failed to allocate memory\n");
-		goto inject_error;
+		goto inject_err3;
 	}
 
 	/* malloc() succeeded, copy path of shared lib into the malloc'd
 	 * buffer.
 	 */
-	ptrace_write(target, tgt_buf, libpath, libpath_len);
+	if (ptrace_write(target, tgt_buf, libpath, libpath_len) < 0)
+		goto inject_err3;
 
 	/* continue the target's execution and call __libc_dlopen_mode. */
 	regs.rip = addr + 2;
@@ -500,28 +518,28 @@ size_t inject_shared_library(pid_t target, char *new_libname, char *orig_libname
 	regs.rdi = tgt_buf;
 	regs.rsi = RTLD_NOW;
 
-	ptrace_setregs(target, &regs);
-	ptrace_cont(target);
+	if (ptrace_setregs(target, &regs) < 0)
+		goto inject_err3;
+
+	if (ptrace_cont(target) < 0)
+		goto inject_err3;
 
 	memset(&target_regs, 0, sizeof(struct user_regs_struct));
-	ptrace_getregs(target, &target_regs);
-	lib_addr = target_regs.rax;
+
+	if (ptrace_getregs(target, &target_regs) < 0)
+		goto inject_err3;
 
 	/* if rax is 0 here, dlopen() failed, bail out cleanly. */
+	lib_addr = target_regs.rax;
 	if (lib_addr == 0) {
-		error = -1;
 		fprintf(stderr, "dlopen() failed to load %s\n", new_libname);
-		goto inject_error;
+		goto inject_err3;
 	}
 
 	/* now check /proc/pid/maps to see whether injection succecced. */
-	if (check_loaded(target, new_libname))
-		printf("\"%s\" successfully injected\n", new_libname);
-	else {
-		error = -1;
-		fprintf(stderr, "could not inject \"%s\"\n", new_libname);
-		goto inject_error;
-	}
+
+	if (check_loaded(target, new_libname) < 0)
+		goto inject_err3;
 
 	/* call free() and we don't care whether this succeeds, so don't
 	 * bother checking the return value.
@@ -529,15 +547,18 @@ size_t inject_shared_library(pid_t target, char *new_libname, char *orig_libname
 	regs.rip = addr + 2;
 	regs.r9 = tgt_freeaddr;
 	regs.rdi = tgt_buf;
-	ptrace_setregs(target, &regs);
-	ptrace_cont(target);
 
+	if (ptrace_setregs(target, &regs) < 0)
+		goto inject_err3;
+
+	if (ptrace_cont(target) < 0)
+		goto inject_err3;
 
 	/* call munmap() to free orignal library memory. */
 	sprintf(filename, "/proc/%d/maps", target);
 	fp = fopen(filename, "r");
 	if (fp == NULL)
-		return -1;
+		goto inject_err3;
 
 	while (fgets(line, 850, fp) != NULL) {
 		sscanf(line, "%lx-%lx %*s %*s %*s %*d %*s", &start, &end);
@@ -546,29 +567,38 @@ size_t inject_shared_library(pid_t target, char *new_libname, char *orig_libname
 			regs.r9 = tgt_munmapaddr;
 			regs.rdi = start;
 			regs.rsi = end - start;
-			ptrace_setregs(target, &regs);
-			ptrace_cont(target);
+
+			if (ptrace_setregs(target, &regs) < 0)
+				goto inject_err3;
+
+			if (ptrace_cont(target) < 0)
+				goto inject_err3;
+
 			memset(&target_regs, 0, sizeof(struct user_regs_struct));
-			ptrace_getregs(target, &target_regs);
+			if (ptrace_getregs(target, &target_regs) < 0)
+				goto inject_err3;
+
 			if (target_regs.rax < 0) {
 				printf("free origlib memory failed\n");
-				return -1;
+				goto inject_err3;
 			}
 		}
 	}
 
-	ptrace_write(target, addr, backup, target_snippet_size);
-	ptrace_setregs(target, &oldregs);
 	free(backup);
-	return error;
+	restore_tgt_state(target, addr, backup,
+			target_snippet_size, oldregs);
+	return 0;
 
-inject_error:
+inject_err3:
 	/* restore the old state and detach from the target. */
 	restore_tgt_state(target, addr, backup,
 			target_snippet_size, oldregs);
-	start_tgt_threads(target);
+inject_err2:
 	free(backup);
-	return error;
+inject_err1:
+	start_tgt_threads(target);
+	return -1;
 }
 
 /*
@@ -585,7 +615,7 @@ inject_error:
  * - a pid_t containing the pid of the process (or -1 if not found)
  *
  */
-int check_tgt_stack(pid_t target, char* libname)
+int check_tgt_stack(pid_t target, char *libname)
 {
 	long func_addr, func_size;
 	char *libpath;
@@ -601,46 +631,52 @@ int check_tgt_stack(pid_t target, char* libname)
 
 	libpath = (char *)calloc(1, PATH_MAX * sizeof(char));
 	if (get_libpath(target, libname, &libpath) < 0) {
-		return -1;
+		goto checkstack_err1;
 	}
 
 	libaddr = get_base_addr(target, libname, &liblen);
 	desc = open(libpath, O_RDONLY);
 	if (desc < 0) {
 		fprintf(stderr, "can't open \"%s\"\n", libpath);
-		free(libpath);
-		return -1;
+		goto checkstack_err2;
 	}
 
 	/* Obtain task IDs. */
 	tids = get_tids(&tid, &tids_max, target);
 	if (!tids) {
 		printf("find tids error\n");
-		return -1;
+		goto checkstack_err3;
 	}
 
 	/* check all tasks stack activeness. */
 	for (t = 0; t < tids; t++) {
 		memset(&regs, 0, sizeof(struct user_regs_struct));
-		ptrace_getregs(tid[t], &regs);
+		if (ptrace_getregs(tid[t], &regs) < 0)
+			goto checkstack_err3;
+
 		addr = regs.rip;
 
 		if ((addr >= libaddr) && (addr <= libaddr + liblen)) {
 			printf("stack safety check failed for \"%d\"\n", target);
-			/* Detach all tasks. */
-			start_tgt_threads(target);
-			free(libpath);
-			close(desc);
-			return -1;
+			goto checkstack_err3;
 		}
 	}
 
 	free(libpath);
 	close(desc);
 	return 0;
+
+checkstack_err3:
+	close(desc);
+checkstack_err2:
+	free(libpath);
+checkstack_err1:
+	/* Detach all tasks. */
+	start_tgt_threads(target);
+	return -1;
 }
 
-long get_tgt_funcaddr(pid_t target, char* funcname, char* libname)
+long get_tgt_funcaddr(pid_t target, char *funcname, char *libname)
 {
 	long func_addr;
 	char *libpath;

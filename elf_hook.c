@@ -18,10 +18,8 @@ static int read_header(int d, Elf_Ehdr **header)
 	if (lseek(d, 0, SEEK_SET) < 0)
 		return -errno;
 
-	if (read(d, *header, sizeof(Elf_Ehdr)) <= 0) {
-		errno = EINVAL;
-		return -errno;
-	}
+	if (read(d, *header, sizeof(Elf_Ehdr)) <= 0)
+		return -EINVAL;
 
 	return 0;
 }
@@ -29,6 +27,7 @@ static int read_header(int d, Elf_Ehdr **header)
 bool is_shared_object_file(int d)
 {
 	Elf_Ehdr *header = NULL;
+	int e_type;
 
 	header = (Elf_Ehdr *)malloc(sizeof(Elf_Ehdr));
 	if (header == NULL) {
@@ -42,7 +41,7 @@ bool is_shared_object_file(int d)
 		return false;
 	}
 
-	int e_type = header->e_type;
+	e_type = header->e_type;
 	free(header);
 
 	if (e_type == ET_DYN)
@@ -55,20 +54,16 @@ static int read_section_table(int d, Elf_Ehdr const *header, Elf_Shdr **table)
 {
 	size_t size;
 
-	if (header == NULL || *table == NULL) {
-		errno = EINVAL;
-		return errno;
-	}
+	if (header == NULL || *table == NULL)
+		return -EINVAL;
 
 	size = header->e_shnum * sizeof(Elf_Shdr);
 
 	if (lseek(d, header->e_shoff, SEEK_SET) < 0)
 		return -errno;
 
-	if (read(d, *table, size) <= 0) {
-		errno = EINVAL;
-		return -errno;
-	}
+	if (read(d, *table, size) <= 0)
+		return -EINVAL;
 
 	return 0;
 }
@@ -76,36 +71,28 @@ static int read_section_table(int d, Elf_Ehdr const *header, Elf_Shdr **table)
 static int read_string_table(int d, Elf_Shdr const *section,
 				char const **strings)
 {
-	if (section == NULL || *strings == NULL) {
-		errno = EINVAL;
-		return -errno;
-	}
+	if (section == NULL || *strings == NULL)
+		return -EINVAL;
 
 	if (lseek(d, section->sh_offset, SEEK_SET) < 0)
 		return -errno;
 
-	if (read(d, (char *)*strings, section->sh_size) <= 0) {
-		errno = EINVAL;
-		return -errno;
-	}
+	if (read(d, (char *)*strings, section->sh_size) <= 0)
+		return -EINVAL;
 
 	return 0;
 }
 
 static int read_symbol_table(int d, Elf_Shdr const *section, Elf_Sym **table)
 {
-	if (section == NULL || *table == NULL) {
-		errno = EINVAL;
-		return -errno;
-	}
+	if (section == NULL || *table == NULL)
+		return -EINVAL;
 
 	if (lseek(d, section->sh_offset, SEEK_SET) < 0)
 		return -errno;
 
-	if (read(d, *table, section->sh_size) <= 0) {
-		errno = EINVAL;
-		return -errno;
-	}
+	if (read(d, *table, section->sh_size) <= 0)
+		return -EINVAL;
 
 	return 0;
 }
@@ -113,18 +100,14 @@ static int read_symbol_table(int d, Elf_Shdr const *section, Elf_Sym **table)
 static int read_relocation_table(int d, Elf_Shdr const *section,
 					Elf_Rel **table)
 {
-	if (section == NULL || *table == NULL) {
-		errno = EINVAL;
-		return -errno;
-	}
+	if (section == NULL || *table == NULL)
+		return -EINVAL;
 
 	if (lseek(d, section->sh_offset, SEEK_SET) < 0)
-	    return -errno;
+		return -errno;
 
-	if (read(d, *table, section->sh_size) <= 0) {
-	    errno = EINVAL;
-	    return -errno;
-	}
+	if (read(d, *table, section->sh_size) <= 0)
+		return -EINVAL;
 
 	return 0;
 }
@@ -134,10 +117,8 @@ static int section_by_index(int d, size_t const index, Elf_Shdr **section)
 	Elf_Ehdr *header = NULL;
 	Elf_Shdr *sections = NULL;
 
-	if (*section == NULL) {
-		errno = EINVAL;
-		return -errno;
-	}
+	if (*section == NULL)
+		return -EINVAL;
 
 	header = (Elf_Ehdr *)malloc(sizeof(Elf_Ehdr));
 	if (header == NULL)
@@ -154,7 +135,7 @@ static int section_by_index(int d, size_t const index, Elf_Shdr **section)
 		return -errno;
 	}
 
-	if(read_section_table(d, header, &sections) < 0) {
+	if (read_section_table(d, header, &sections) < 0) {
 		free(header);
 		free(sections);
 		return -errno;
@@ -165,8 +146,7 @@ static int section_by_index(int d, size_t const index, Elf_Shdr **section)
 	} else {
 		free(header);
 		free(sections);
-		errno = EINVAL;
-		return -errno;
+		return -EINVAL;
 	}
 
 	free(header);
@@ -181,10 +161,8 @@ int section_by_type(int d, size_t const section_type, Elf_Shdr **section)
 	Elf_Shdr *sections = NULL;
 	size_t i;
 
-	if (*section == NULL) {
-		errno = EINVAL;
-		return -errno;
-	}
+	if (*section == NULL)
+		return -EINVAL;
 
 	header = (Elf_Ehdr *)malloc(sizeof(Elf_Ehdr));
 	if (header == NULL)
@@ -228,10 +206,8 @@ static int section_by_name(int d, char const *section_name, Elf_Shdr **section)
 	char const *strings = NULL;
 	size_t i;
 
-	if (*section == NULL) {
-		errno = EINVAL;
-		return -errno;
-	}
+	if (*section == NULL)
+		return -EINVAL;
 
 	header = (Elf_Ehdr *)malloc(sizeof(Elf_Ehdr));
 	if (header == NULL)
@@ -293,10 +269,8 @@ int symbol_by_name(int d, Elf_Shdr *section, char const *name,
 
 	*index = 0;
 
-	if (*symbol == NULL) {
-		errno == EINVAL;
-		return -errno;
-	}
+	if (*symbol == NULL)
+		return -EINVAL;
 
 	strings_section = (Elf_Shdr *)malloc(sizeof(Elf_Shdr));
 	if (strings_section == NULL)
@@ -313,7 +287,7 @@ int symbol_by_name(int d, Elf_Shdr *section, char const *name,
 		return -errno;
 	}
 
-	if(read_string_table(d, strings_section, &strings) < 0) {
+	if (read_string_table(d, strings_section, &strings) < 0) {
 		free(strings_section);
 		free((void *)strings);
 		return -errno;
@@ -326,7 +300,7 @@ int symbol_by_name(int d, Elf_Shdr *section, char const *name,
 		return -errno;
 	}
 
-	if(read_symbol_table(d, section, &symbols) < 0) {
+	if (read_symbol_table(d, section, &symbols) < 0) {
 		free(strings_section);
 		free((void *)strings);
 		free(symbols);
@@ -351,10 +325,13 @@ int symbol_by_name(int d, Elf_Shdr *section, char const *name,
 	return 0;
 }
 
-int elf_hook(pid_t target, char *funcname, char *new_libname, char *orig_libname) {
+int elf_hook(pid_t target, char *funcname, char *new_libname,
+		char *orig_libname)
+{
 	static size_t pagesize;
 	int desc;
 	char *tgt_elfpath;
+
 	errno = 0;
 
 	/* ".dynsym" section header */
@@ -368,6 +345,7 @@ int elf_hook(pid_t target, char *funcname, char *new_libname, char *orig_libname
 
 	/* array with ".rel.plt" entries */
 	Elf_Rel *rel_plt_table = NULL;
+	Elf_Rel *relplt_t = NULL;
 
 	size_t
 	i,
@@ -442,7 +420,7 @@ int elf_hook(pid_t target, char *funcname, char *new_libname, char *orig_libname
 	 * and the symbol's index
 	 * lookup the ".rel.plt" table
 	 */
-	Elf_Rel *relplt_t = calloc(1, sizeof(Elf_Rel));
+	relplt_t = calloc(1, sizeof(Elf_Rel));
 	if (relplt_t == NULL)
 		goto hook_err6;
 
@@ -451,7 +429,9 @@ int elf_hook(pid_t target, char *funcname, char *new_libname, char *orig_libname
 		goto hook_err7;
 
 	for (i = 0; i < rel_plt_amount; ++i) {
-		ptrace_read(target, (unsigned long)&(rel_plt_table[i]), (void *)relplt_t, sizeof(Elf_Rel));
+		if (ptrace_read(target, (unsigned long)&(rel_plt_table[i]),
+					(void *)relplt_t, sizeof(Elf_Rel)) < 0)
+			goto hook_err8;
 		/* if we found the symbol to substitute in ".rel.plt" */
 		if (ELF_R_SYM(relplt_t->r_info) == name_index) {
 			/* the target symbol appears in ".rel.plt" only once */
@@ -463,9 +443,12 @@ int elf_hook(pid_t target, char *funcname, char *new_libname, char *orig_libname
 	/*save the original function address, and replace it
 	 * with the substitutional
 	 */
-	ptrace_read(target, (unsigned long)name_address, original, sizeof(long));
+	if (ptrace_read(target, (unsigned long)name_address,
+				original, sizeof(long)) < 0)
+		goto hook_err8;
 	ptrace_write(target, (unsigned long)name_address, subst, sizeof(long));
 
+hook_err8:
 	free(original);
 hook_err7:
 	free(relplt_t);
@@ -484,11 +467,14 @@ hook_err1:
 	return -errno;
 }
 
-int parse_symbol_list(pid_t target, struct list_head *list, char *orig_libname) {
+int parse_symbol_list(pid_t target, struct list_head *list,
+		char *orig_libname)
+{
 	int tgt_desc;
 	int origlib_desc;
 	char *tgt_elfpath;
 	char *orig_libpath;
+
 	errno = 0;
 
 	/* original library's ".dynsym" section header */
@@ -496,6 +482,7 @@ int parse_symbol_list(pid_t target, struct list_head *list, char *orig_libname) 
 
 	/* taget process's ".rel.plt" section header */
 	Elf_Shdr *tgt_relplt = NULL;
+	Elf_Rel *tgt_relplt_t = NULL;
 
 	size_t i, j;
 	size_t n_origlib_dynsym, n_tgt_relplt;
@@ -506,14 +493,13 @@ int parse_symbol_list(pid_t target, struct list_head *list, char *orig_libname) 
 	char const *tgt_strs = NULL;
 
 	Elf_Shdr *origlib_strsect = NULL;
-	char const * origlib_strs= NULL;
+	char const *origlib_strs = NULL;
 	Elf_Sym *origlib_syms = NULL;
 	struct symstr_list *tmp;
 
 	orig_libpath = (char *)calloc(1, PATH_MAX * sizeof(char));
-	if (orig_libpath == NULL) {
+	if (orig_libpath == NULL)
 		return -errno;
-	}
 
 	if (get_libpath(target, orig_libname, &orig_libpath) < 0) {
 		free(orig_libpath);
@@ -524,9 +510,9 @@ int parse_symbol_list(pid_t target, struct list_head *list, char *orig_libname) 
 	if (origlib_desc < 0) {
 		free(orig_libpath);
 		return -errno;
-	} else {
-		free(orig_libpath);
 	}
+
+	free(orig_libpath);
 
 	origlib_dynsym = (Elf_Shdr *)malloc(sizeof(Elf_Shdr));
 	if (origlib_dynsym == NULL)
@@ -540,14 +526,15 @@ int parse_symbol_list(pid_t target, struct list_head *list, char *orig_libname) 
 	if (origlib_strsect == NULL)
 		goto err2;
 
-	if (section_by_index(origlib_desc, origlib_dynsym->sh_link, &origlib_strsect) < 0)
+	if (section_by_index(origlib_desc, origlib_dynsym->sh_link,
+				&origlib_strsect) < 0)
 		goto err3;
 
 	origlib_strs = (char const *)malloc(origlib_strsect->sh_size);
 	if (origlib_strs == NULL)
 		goto err3;
 
-        if (read_string_table(origlib_desc, origlib_strsect, &origlib_strs) < 0)
+	if (read_string_table(origlib_desc, origlib_strsect, &origlib_strs) < 0)
 		goto err4;
 
 	origlib_syms = (Elf_Sym *)malloc(origlib_dynsym->sh_size);
@@ -575,8 +562,6 @@ int parse_symbol_list(pid_t target, struct list_head *list, char *orig_libname) 
 
 	if (section_by_name(tgt_desc, REL_PLT, &tgt_relplt) < 0)
 		goto err8;
-
-	Elf_Rel *tgt_relplt_t;
 
 	tgt_symsect = (Elf_Shdr *)malloc(sizeof(Elf_Shdr));
 	if (tgt_symsect == NULL)
@@ -622,7 +607,7 @@ int parse_symbol_list(pid_t target, struct list_head *list, char *orig_libname) 
 			if (!strcmp(&tgt_strs[index], &origlib_strs[origlib_syms[j].st_name])
 					&& origlib_syms[j].st_size) {
 				tmp = (struct symstr_list *)malloc(sizeof(struct symstr_list));
-				tmp->string = (char *)malloc(strlen(&tgt_strs[index]) +1 );
+				tmp->string = (char *)malloc(strlen(&tgt_strs[index]) + 1);
 				memcpy(tmp->string, &tgt_strs[index], strlen(&tgt_strs[index]) + 1);
 				list_add_tail(&(tmp->list), list);
 			}

@@ -9,14 +9,14 @@
 #include "elf_hook.h"
 #include "list.h"
 
-char *command = NULL, *command_arg = NULL;
-char *orig_libname = NULL, *new_libname = NULL;
-char *proc_name = NULL;
-pid_t target = 0;
+char *command, *command_arg;
+char *orig_libname, *new_libname;
+char *proc_name;
+pid_t target;
 
 struct symstr_list symstr_l;
 
-static int parse_args(int argc, char ** argv)
+static int parse_args(int argc, char **argv)
 {
 	if (argc < 4) {
 		usage(argv[0]);
@@ -75,18 +75,18 @@ int main(int argc, char **argv)
 		return -1;
 
 	/* check the target process's stack activeness */
-	if (check_tgt_stack(target, orig_libname) < 0) {
+	if (check_tgt_stack(target, orig_libname) < 0)
 		return -1;
-	}
 
 	error = inject_shared_library(target, new_libname, orig_libname);
-	if(error < 0)
+	if (error < 0)
 		return error;
 
 	/* substitute one by one */
-	list_for_each_entry(tmp, &symstr_l.list, list){
-		printf("%s\n", tmp->string);
-		if (elf_hook(target, tmp->string, new_libname, orig_libname) < 0) {
+	list_for_each_entry(tmp, &symstr_l.list, list) {
+		printf("%s is substituted\n", tmp->string);
+		if (elf_hook(target, tmp->string, new_libname,
+					orig_libname) < 0) {
 			error = -1;
 			break;
 		}

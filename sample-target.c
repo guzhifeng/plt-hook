@@ -35,14 +35,14 @@ void sleepfunc(void)
  * Call sleepfunc(), which loops forever.
  *
  */
-void* thread_test(void* ptr)
+void *thread_test(void *ptr)
 {
 	struct timespec *sleeptime = malloc(sizeof(struct timespec));
 
 	sleeptime->tv_sec = 2;
 	sleeptime->tv_nsec = 0;
 
-	while(1) {
+	while (1) {
 		printf("i am a child thread\n");
 		nanosleep(sleeptime, NULL);
 	}

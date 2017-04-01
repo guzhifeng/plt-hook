@@ -14,15 +14,8 @@
 
 int ptrace_attach(pid_t target)
 {
-	int waitpidstatus;
-
 	if (ptrace(PTRACE_ATTACH, target, NULL, NULL) == -1) {
 		fprintf(stderr, "ptrace(PTRACE_ATTACH) failed\n");
-		return -errno;
-	}
-
-	if (waitpid(target, &waitpidstatus, WUNTRACED) != target) {
-		fprintf(stderr, "waitpid(%d) failed\n", target);
 		return -errno;
 	}
 
