@@ -400,11 +400,11 @@ size_t inject_shared_library(pid_t target, char *new_libname,
 	pid_t mypid = 0;
 	long my_libcaddr, tgt_libcaddr;
 	long my_mallocaddr, my_freeaddr;
-	long my_dlopenaddr, my_munmapaddr;
+	long my_dlopenaddr;
 	long malloc_offset, free_offset;
-	long dlopen_offset, munmap_offset;
+	long dlopen_offset;
 	long tgt_mallocaddr, tgt_freeaddr;
-	long tgt_dlopenaddr, tgt_munmapaddr;
+	long tgt_dlopenaddr;
 	struct user_regs_struct oldregs, regs;
 	struct user_regs_struct target_regs;
 	long addr, curr;
@@ -438,18 +438,15 @@ size_t inject_shared_library(pid_t target, char *new_libname,
 	my_mallocaddr = get_libc_funcaddr("malloc");
 	my_freeaddr = get_libc_funcaddr("free");
 	my_dlopenaddr = get_libc_funcaddr("__libc_dlopen_mode");
-	my_munmapaddr = get_libc_funcaddr("munmap");
 
 	malloc_offset = my_mallocaddr - my_libcaddr;
 	free_offset = my_freeaddr - my_libcaddr;
 	dlopen_offset = my_dlopenaddr - my_libcaddr;
-	munmap_offset = my_munmapaddr - my_libcaddr;
 
 	/* get the target process' libc function address */
 	tgt_mallocaddr = tgt_libcaddr + malloc_offset;
 	tgt_freeaddr = tgt_libcaddr + free_offset;
 	tgt_dlopenaddr = tgt_libcaddr + dlopen_offset;
-	tgt_munmapaddr = tgt_libcaddr + munmap_offset;
 
 	memset(&oldregs, 0, sizeof(struct user_regs_struct));
 	memset(&regs, 0, sizeof(struct user_regs_struct));
@@ -553,37 +550,6 @@ size_t inject_shared_library(pid_t target, char *new_libname,
 
 	if (ptrace_cont(target) < 0)
 		goto inject_err3;
-
-	/* call munmap() to free orignal library memory. */
-	sprintf(filename, "/proc/%d/maps", target);
-	fp = fopen(filename, "r");
-	if (fp == NULL)
-		goto inject_err3;
-
-	while (fgets(line, 850, fp) != NULL) {
-		sscanf(line, "%lx-%lx %*s %*s %*s %*d %*s", &start, &end);
-		if (strstr(line, orig_libname) != NULL) {
-			regs.rip = addr + 2;
-			regs.r9 = tgt_munmapaddr;
-			regs.rdi = start;
-			regs.rsi = end - start;
-
-			if (ptrace_setregs(target, &regs) < 0)
-				goto inject_err3;
-
-			if (ptrace_cont(target) < 0)
-				goto inject_err3;
-
-			memset(&target_regs, 0, sizeof(struct user_regs_struct));
-			if (ptrace_getregs(target, &target_regs) < 0)
-				goto inject_err3;
-
-			if (target_regs.rax < 0) {
-				printf("free origlib memory failed\n");
-				goto inject_err3;
-			}
-		}
-	}
 
 	free(backup);
 	restore_tgt_state(target, addr, backup,
