@@ -32,33 +32,43 @@
     	./inject [-n process-name] [-p pid] [original-library] [library-to-inject]
 
 ## Sample
+* Creates the necessary links and cache to libsample.so  
 
-* In one terminal, start up the sample target app, which simply outputs "sleeping..." each second:
+		$ mkdir /usr/lib64/plt-hook
+		$ cp libsample.so /usr/lib64/plt-hook/
+		$ touch /etc/ld.so.conf.d/test.conf
+			/usr/lib64/plt-hook
+		$ ldconfig -v | grep sample
+			libsample.so -> libsample.so
+
+* In one terminal, start up the sample target app, which simply outputs:
 
         ./sample-target
+		call the addition: 7
+		main thread: result = 7
+		call the addition: 7
+		child thread: result = 7
+		call the addition: 7
+		main thread: result = 7
+		call the addition: 7
+		child thread: result = 7
+		call the addition: 7
+		main thread: result = 7
+
+* Creates the necessary links and cache to libsampleupdate.so
+  
+		$ cp libsampleupdate.so /usr/lib64/plt-hook/
+		$ ldconfig -v | grep sample
+			libsample.so -> libsample.so
+		libsampleupdate.so -> libsampleupdate.so
 
 * In another terminal, inject sample-library.so into the target app:
 
-        ./inject -n sample-target libsample.so  libsampleupdate.so
+        ./inject -n sample-target libsample.so  /usr/lib64/plt-hook/libsampleupdate.so
 
 *  The output should look something like this:
 
- * First terminal: 
- 
-			$ ./sample-target 
-			call the addition: 7
-			main thread: result = 7
-			call the addition: 7
-			child thread: result = 7
-			call the addition: 7
-			main thread: result = 7
-			call the addition: 7
-			child thread: result = 7
-			call the addition: 7
-			main thread: result = 7
-			...
-
- * Second terminal:
+ * On second terminal:
    
  			$ ./inject -n sample-target libsample.so libsampleupdate.so
 			targeting process "sample-target" with pid 3267
@@ -113,8 +123,30 @@
 		0x00007fed697bcaf0  0x00007fed697d6520  Yes         /lib64/ld-linux-x86-64.so.2
 		0x00007fed685da5e0  0x00007fed685da704  Yes         /data/home/zhuozh/plt-hook/libsampleupdate.so
         (gdb)
+* You can also restore the original library, in case you regret the substitution.
+
+		$ ./inject -n sample-target libsampleupdate.so  /usr/lib64/plt-hook/libsample.so
+
+	* On first terminal:  
+	
+			...
+			main thread: result = 8
+			call the multiplication: 8
+			child thread: result = 8
+			call the multiplication: 8
+			main thread: result = 8
+			call the multiplication: 8
+			main thread: result = 8
+			call the addition: 7
+			child thread: result = 7
+			call the addition: 7
+			main thread: result = 7
+			call the addition: 7
+			main thread: result = 7
 
 ## TODOs / Known Issues
+* Unload original library will cause ld.so crash, just leave original library in the memory as a workaround.
+
 * Support only X86_64 version
 
 * Support more distros
