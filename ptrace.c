@@ -14,10 +14,14 @@
 
 int ptrace_attach(pid_t target)
 {
+	int status = 0;
+
 	if (ptrace(PTRACE_ATTACH, target, NULL, NULL) == -1) {
 		printf("ptrace(PTRACE_ATTACH) failed:%s\n", strerror(errno));
 		return -errno;
 	}
+
+	waitpid(target, &status , WUNTRACED);
 
 	return 0;
 }
