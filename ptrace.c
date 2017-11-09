@@ -98,8 +98,9 @@ int ptrace_cont(pid_t target)
 	nanosleep(sleeptime, NULL);
 
 	/* make sure the target process received SIGTRAP after stopping. */
-	if ((checktargetsig(target)) < 0) {
-		printf("checktargetsig failed, wait longer please!\n");
+	while ((checktargetsig(target)) < 0) {
+		printf("checktargetsig failed, try again!\n");
+		nanosleep(sleeptime, NULL);
 		return -1;
 	}
 	return 0;
