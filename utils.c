@@ -626,6 +626,8 @@ int check_tgt_stack(pid_t target, char *libname)
 			printf("stack safety check failed for \"%d\"\n", target);
 			goto checkstack_err3;
 		}
+		/* all threads share the same RIP, just check once*/
+		break;
 	}
 
 	free(libpath);
