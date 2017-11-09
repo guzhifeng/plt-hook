@@ -75,12 +75,14 @@ int main(int argc, char **argv)
 		return -1;
 
 	/* check the target process's stack activeness */
-	if (check_tgt_stack(target, orig_libname) < 0)
-		return -1;
+	if (check_tgt_stack(target, orig_libname) < 0) {
+		error = -1;
+		goto cont;
+	}
 
 	error = inject_shared_library(target, new_libname, orig_libname);
 	if (error < 0)
-		return error;
+		goto cont;
 
 	/* substitute one by one */
 	list_for_each_entry(tmp, &symstr_l.list, list) {
@@ -91,7 +93,7 @@ int main(int argc, char **argv)
 			break;
 		}
 	}
-
+cont:
 	start_tgt_threads(target);
 	return error;
 }
