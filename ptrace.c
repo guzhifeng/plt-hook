@@ -15,7 +15,7 @@
 int ptrace_attach(pid_t target)
 {
 	if (ptrace(PTRACE_ATTACH, target, NULL, NULL) == -1) {
-		fprintf(stderr, "ptrace(PTRACE_ATTACH) failed\n");
+		printf("ptrace(PTRACE_ATTACH) failed:%s\n", strerror(errno));
 		return -errno;
 	}
 
@@ -36,7 +36,7 @@ int ptrace_attach(pid_t target)
 int ptrace_detach(pid_t target)
 {
 	if (ptrace(PTRACE_DETACH, target, NULL, NULL) == -1) {
-		fprintf(stderr, "ptrace(PTRACE_DETACH) failed\n");
+		printf("ptrace(PTRACE_DETACH) failed: %s\n", strerror(errno));
 		return -errno;
 	}
 
@@ -60,7 +60,7 @@ int ptrace_detach(pid_t target)
 int ptrace_getregs(pid_t target, struct REG_TYPE *regs)
 {
 	if (ptrace(PTRACE_GETREGS, target, NULL, regs) == -1) {
-		fprintf(stderr, "ptrace(PTRACE_GETREGS) failed\n");
+		printf("ptrace(PTRACE_GETREGS) failed: %s\n", strerror(errno));
 		return -errno;
 	}
 
@@ -87,7 +87,7 @@ int ptrace_cont(pid_t target)
 	sleeptime->tv_nsec = 50000000;
 
 	if (ptrace(PTRACE_CONT, target, NULL, NULL) == -1) {
-		fprintf(stderr, "ptrace(PTRACE_CONT) failed\n");
+		printf("ptrace(PTRACE_CONT) failed: %s\n", strerror(errno));
 		return -errno;
 	}
 
@@ -117,7 +117,7 @@ int ptrace_cont(pid_t target)
 int ptrace_setregs(pid_t target, struct REG_TYPE *regs)
 {
 	if (ptrace(PTRACE_SETREGS, target, NULL, regs) == -1) {
-		fprintf(stderr, "ptrace(PTRACE_SETREGS) failed\n");
+		printf("ptrace(PTRACE_SETREGS) failed: %s\n", strerror(errno));
 		return -errno;
 	}
 
@@ -143,7 +143,7 @@ int ptrace_setregs(pid_t target, struct REG_TYPE *regs)
 int ptrace_getsiginfo(pid_t target, siginfo_t *targetsig)
 {
 	if (ptrace(PTRACE_GETSIGINFO, target, NULL, targetsig) == -1) {
-		fprintf(stderr, "ptrace(PTRACE_GETSIGINFO) failed\n");
+		printf("ptrace(PTRACE_GETSIGINFO) failed: %s\n", strerror(errno));
 		return -errno;
 	}
 
@@ -173,7 +173,7 @@ int ptrace_read(int pid, unsigned long addr, void *vptr, int len)
 	while (bytesRead < len) {
 		word = ptrace(PTRACE_PEEKTEXT, pid, addr + bytesRead, NULL);
 		if (word == -1) {
-			fprintf(stderr, "ptrace(PTRACE_PEEKTEXT) failed\n");
+			printf("ptrace(PTRACE_PEEKTEXT) failed: %s\n", strerror(errno));
 			return -errno;
 		}
 		bytesRead += sizeof(word);
@@ -206,7 +206,7 @@ int ptrace_write(int pid, unsigned long addr, void *vptr, int len)
 		memcpy(&word, vptr + byteCount, sizeof(word));
 		word = ptrace(PTRACE_POKETEXT, pid, addr + byteCount, word);
 		if (word == -1) {
-			fprintf(stderr, "ptrace(PTRACE_POKETEXT) failed\n");
+			printf("ptrace(PTRACE_POKETEXT) failed: %s\n", strerror(errno));
 			return -errno;
 		}
 		byteCount += sizeof(word);
